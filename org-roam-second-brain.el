@@ -395,7 +395,7 @@ Returns list of plists with file, title, and similarity."
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string)))
-           (similar (org-roam-semantic-get-similar-data content 20 nil threshold))
+           (similar (org-roam-semantic-get-similar-data content 20 threshold))
            ;; Get existing links from this file
            (existing-links (make-hash-table :test 'equal))
            (node (sb/--node-from-file file)))
