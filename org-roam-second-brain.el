@@ -49,9 +49,10 @@ Set to nil if you prefer to call `sb/digest' manually."
   :type 'boolean
   :group 'sb)
 
-(defcustom sb/proactive-suggestions t
+(defcustom sb/proactive-suggestions nil
   "Whether to show proactive link suggestions when visiting notes.
-Suggestions appear for notes that could be linked but aren't."
+Suggestions appear for notes that could be linked but aren't.
+Disabled by default as it makes an API call on every file open."
   :type 'boolean
   :group 'sb)
 
