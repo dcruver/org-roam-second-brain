@@ -47,7 +47,7 @@ Create notes with predefined structures:
 Configure the embedding service URL (required for semantic features):
 
 ```elisp
-(setq org-roam-semantic-embedding-url "http://localhost:7997")
+(setq org-roam-semantic-embedding-url "http://localhost:8080")
 (setq org-roam-semantic-embedding-model "nomic-ai/nomic-embed-text-v1.5")
 ```
 
@@ -59,7 +59,7 @@ Or use `M-x customize-group RET org-roam-vector-search RET`.
 (setq sb/stale-days 5)                    ; Days before project is "stale"
 (setq sb/similarity-threshold 0.6)        ; Minimum similarity for suggestions
 (setq sb/show-digest-on-startup t)        ; Show digest when Emacs starts
-(setq sb/proactive-suggestions t)         ; Show suggestion hints when visiting notes
+(setq sb/proactive-suggestions nil)       ; Show suggestion hints when visiting notes (off by default)
 ```
 
 Or use `M-x customize-group RET sb RET`.
@@ -103,7 +103,7 @@ Semantic features require an embedding service. Options:
 
 ### Infinity (recommended)
 ```bash
-docker run -p 7997:7997 michaelf34/infinity:latest \
+docker run -p 8080:7997 michaelf34/infinity:latest \
   --model-id nomic-ai/nomic-embed-text-v1.5 --port 7997
 ```
 
