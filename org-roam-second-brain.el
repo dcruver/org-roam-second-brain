@@ -60,7 +60,8 @@ Disabled by default as it makes an API call on every file open."
   '((person . "people")
     (project . "projects")
     (idea . "ideas")
-    (admin . "admin"))
+    (admin . "admin")
+    (blog . "blog"))
   "Subdirectories for each node type.
 Alist mapping node type symbols to subdirectory names under `org-roam-directory'."
   :type '(alist :key-type symbol :value-type string)
@@ -74,6 +75,28 @@ Alist mapping node type symbols to subdirectory names under `org-roam-directory'
 (defcustom sb/suggestions-buffer-name "*Link Suggestions*"
   "Name of the buffer for displaying link suggestions."
   :type 'string
+  :group 'sb)
+
+(defcustom sb/hugo-base-dir "~/Projects/hullabalooing/blog"
+  "Path to Hugo site root directory.
+Used by blog publishing functions to locate content directory."
+  :type 'directory
+  :group 'sb)
+
+(defcustom sb/hugo-sections
+  '("signalscope" "health-tracking" "homelab" "gpu-ai"
+    "second-brain" "cyberdeck" "side-projects" "writing")
+  "Valid Hugo sections for blog posts.
+Each section corresponds to a project area in the Hugo site."
+  :type '(repeat string)
+  :group 'sb)
+
+(defcustom sb/blog-llm-function nil
+  "Function to call for LLM operations in blog writing.
+Should accept (PROMPT CONTENT) and return generated text.
+If nil, AI functions will not be available."
+  :type '(choice (const :tag "Disabled" nil)
+                 (function :tag "LLM function"))
   :group 'sb)
 
 ;;; ============================================================================
@@ -452,6 +475,141 @@ Returns plist with all digest information."
                                 :projects stale)
           :dangling-links (list :total (length dangling)
                                 :items (seq-take dangling 5)))))
+
+;;; ============================================================================
+;;; BLOG POST FUNCTIONS
+;;; ============================================================================
+
+(defun sb/--blog-template (title section)
+  "Generate blog post template for TITLE in SECTION."
+  (format "* Outline
+- [ ] Introduction
+- [ ] Main points
+- [ ] Conclusion
+
+* Draft
+
+* Research
+"))
+
+(defun sb/core-create-blog (title section &optional slug)
+  "Create a blog post node with TITLE for SECTION.
+SLUG is optional; if nil, generated from title.
+Returns plist with :id, :file, :title, :section."
+  (let* ((slug (or slug (downcase (replace-regexp-in-string "[^a-zA-Z0-9]+" "-" title))))
+         (filepath (sb/--create-filepath title 'blog))
+         (id (org-id-new))
+         (date (format-time-string "[%Y-%m-%d %a]"))
+         (hugo-section (format "%s/posts" section)))
+
+    (with-current-buffer (find-file-noselect filepath)
+      (org-mode)
+      (erase-buffer)
+      ;; Properties drawer
+      (insert ":PROPERTIES:\n")
+      (insert (format ":ID: %s\n" id))
+      (insert ":NODE-TYPE: blog\n")
+      (insert (format ":EXPORT_FILE_NAME: %s\n" slug))
+      (insert (format ":EXPORT_HUGO_SECTION: %s\n" hugo-section))
+      (insert ":END:\n")
+      (insert (format "#+title: %s\n" title))
+      (insert (format "#+date: %s\n" date))
+      (insert "#+hugo_draft: true\n")
+      (insert "#+hugo_tags: \n")
+      (insert (format "#+hugo_categories: %s\n\n"
+                      (capitalize (replace-regexp-in-string "-" " " section))))
+      ;; Content template
+      (insert (sb/--blog-template title section))
+      (save-buffer)
+      (kill-buffer (current-buffer)))
+
+    ;; Sync database
+    (org-roam-db-sync)
+
+    ;; Generate embeddings
+    (sb/--generate-embedding filepath)
+
+    ;; Return result
+    (list :id id :file filepath :title title :section section :slug slug)))
+
+(defun sb/core-blog-posts (&optional draft-filter)
+  "Get all blog posts, optionally filtered by draft status.
+DRAFT-FILTER can be:
+  nil     - return all posts
+  'draft  - return only drafts
+  'published - return only published posts
+Returns list of plists with post details."
+  (let ((posts (sb/core-nodes-by-type 'blog)))
+    (when draft-filter
+      (setq posts
+            (seq-filter
+             (lambda (p)
+               (let* ((file (plist-get p :file))
+                      (is-draft (sb/--blog-is-draft file)))
+                 (if (eq draft-filter 'draft)
+                     is-draft
+                   (not is-draft))))
+             posts)))
+    (mapcar
+     (lambda (p)
+       (let* ((file (plist-get p :file))
+              (props (plist-get p :properties))
+              (section (cdr (assoc "export_hugo_section" props)))
+              (days-ago (sb/--file-modified-days-ago file)))
+         (list :id (org-roam-node-id (plist-get p :node))
+               :title (plist-get p :title)
+               :file file
+               :section section
+               :draft (sb/--blog-is-draft file)
+               :days-since-modified (round (or days-ago 0)))))
+     posts)))
+
+(defun sb/--blog-is-draft (file)
+  "Check if blog FILE is marked as draft."
+  (when (and file (file-exists-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (if (re-search-forward "^#\\+hugo_draft:\\s-*\\(true\\|false\\)" nil t)
+          (string= (match-string 1) "true")
+        t))))  ; Default to draft if not specified
+
+(defun sb/--blog-set-draft-value (file value)
+  "Set draft status in blog FILE to VALUE (t or nil)."
+  (when (and file (file-exists-p file))
+    (with-current-buffer (find-file-noselect file)
+      (goto-char (point-min))
+      (if (re-search-forward "^#\\+hugo_draft:\\s-*\\(true\\|false\\)" nil t)
+          (replace-match (format "#+hugo_draft: %s" (if value "true" "false")))
+        ;; Insert if not found
+        (goto-char (point-min))
+        (when (re-search-forward "^#\\+date:" nil t)
+          (end-of-line)
+          (insert (format "\n#+hugo_draft: %s" (if value "true" "false")))))
+      (save-buffer))))
+
+(defun sb/--blog-get-property (file property)
+  "Get PROPERTY value from blog FILE."
+  (when (and file (file-exists-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (when (re-search-forward (format "^:%s:\\s-*\\(.+\\)$"
+                                       (upcase property)) nil t)
+        (string-trim (match-string 1))))))
+
+(defun sb/--blog-validate (file)
+  "Validate blog FILE has required properties for publishing.
+Returns nil if valid, or a string describing the issue."
+  (let ((export-file-name (sb/--blog-get-property file "EXPORT_FILE_NAME"))
+        (export-section (sb/--blog-get-property file "EXPORT_HUGO_SECTION")))
+    (cond
+     ((not export-file-name) "Missing EXPORT_FILE_NAME property")
+     ((not export-section) "Missing EXPORT_HUGO_SECTION property")
+     ((not (member (car (split-string export-section "/"))
+                   sb/hugo-sections))
+      (format "Invalid section: %s" export-section))
+     (t nil))))
 
 ;;; ============================================================================
 ;;; BUFFER MODE (for digest and suggestions displays)
@@ -938,6 +1096,248 @@ If FILE is nil, uses the current buffer's file."
     (display-buffer buf)))
 
 ;;; ============================================================================
+;;; BLOG INTERACTIVE COMMANDS
+;;; ============================================================================
+
+;;;###autoload
+(defun sb/blog (title)
+  "Create a new blog post with TITLE.
+Prompts for Hugo section interactively."
+  (interactive "sBlog post title: ")
+  (let* ((section (completing-read "Hugo section: " sb/hugo-sections nil t))
+         (result (sb/core-create-blog title section)))
+    (find-file (plist-get result :file))
+    (message "Created blog post: %s in %s" title section)))
+
+;;;###autoload
+(defun sb/blog-set-draft ()
+  "Toggle draft status of the current blog post."
+  (interactive)
+  (let ((file (buffer-file-name)))
+    (unless file
+      (user-error "Not visiting a file"))
+    (let ((is-draft (sb/--blog-is-draft file)))
+      (sb/--blog-set-draft-value file (not is-draft))
+      (revert-buffer t t)
+      (message "Draft status: %s" (if is-draft "false (ready to publish)" "true (draft)")))))
+
+;;;###autoload
+(defun sb/blog-list (&optional filter)
+  "List all blog posts, optionally filtered by FILTER.
+FILTER can be: draft, published, or nil for all."
+  (interactive
+   (list (completing-read "Filter (empty for all): "
+                          '("" "draft" "published") nil t)))
+  (let* ((draft-filter (cond
+                        ((string= filter "draft") 'draft)
+                        ((string= filter "published") 'published)
+                        (t nil)))
+         (posts (sb/core-blog-posts draft-filter))
+         (buf (get-buffer-create "*Blog Posts*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (sb/buffer-mode)
+        (setq sb/buffer-type 'blog-list)
+
+        (insert (propertize (format "Blog Posts%s (%d)\n\n"
+                                    (if (and filter (not (string-empty-p filter)))
+                                        (format " [%s]" filter)
+                                      "")
+                                    (length posts))
+                            'face 'bold))
+
+        (if posts
+            (dolist (p posts)
+              (sb/--insert-item
+               (format "[%s] %s (%s, %dd ago)"
+                       (if (plist-get p :draft) "DRAFT" "LIVE")
+                       (plist-get p :title)
+                       (or (plist-get p :section) "?")
+                       (plist-get p :days-since-modified))
+               p 0))
+          (insert "No blog posts found.\n"))
+
+        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
+        (goto-char (point-min))))
+    (display-buffer buf)))
+
+;;;###autoload
+(defun sb/blog-from-idea ()
+  "Create a blog post from an existing idea node.
+Prompts to select an idea and Hugo section."
+  (interactive)
+  (let* ((ideas (sb/core-nodes-by-type 'idea))
+         (idea-titles (mapcar (lambda (i) (plist-get i :title)) ideas))
+         (selected-title (completing-read "Idea to convert: " idea-titles nil t))
+         (selected-idea (seq-find (lambda (i) (string= (plist-get i :title) selected-title)) ideas))
+         (section (completing-read "Hugo section: " sb/hugo-sections nil t)))
+    (if selected-idea
+        (let* ((idea-file (plist-get selected-idea :file))
+               (idea-content (with-temp-buffer
+                               (insert-file-contents idea-file)
+                               (buffer-string)))
+               (result (sb/core-create-blog selected-title section)))
+          ;; Open the new blog post
+          (find-file (plist-get result :file))
+          ;; Add link to original idea in Research section
+          (goto-char (point-max))
+          (when (re-search-backward "^\\* Research$" nil t)
+            (forward-line 1)
+            (insert (format "- [[id:%s][%s]] (original idea)\n"
+                            (org-roam-node-id (plist-get selected-idea :node))
+                            selected-title)))
+          (save-buffer)
+          (message "Created blog post from idea: %s" selected-title))
+      (user-error "Idea not found"))))
+
+;;;###autoload
+(defun sb/blog-generate-outline ()
+  "Generate an outline for the current blog post using AI.
+Requires `sb/blog-llm-function' to be configured."
+  (interactive)
+  (unless sb/blog-llm-function
+    (user-error "sb/blog-llm-function not configured"))
+  (let* ((file (buffer-file-name))
+         (title (save-excursion
+                  (goto-char (point-min))
+                  (when (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
+                    (match-string 1))))
+         (prompt (format "Generate a detailed blog post outline for: \"%s\"
+
+Create 5-7 main sections with brief descriptions. Format as:
+- [ ] Section Name - brief description of what to cover
+
+Keep it practical and focused." title))
+         (result (funcall sb/blog-llm-function prompt "")))
+    (when result
+      ;; Find the Outline section and replace content
+      (goto-char (point-min))
+      (when (re-search-forward "^\\* Outline$" nil t)
+        (forward-line 1)
+        (let ((start (point)))
+          ;; Delete until next heading or end
+          (if (re-search-forward "^\\* " nil t)
+              (progn (beginning-of-line) (delete-region start (point)))
+            (delete-region start (point-max)))
+          (insert result "\n\n")))
+      (save-buffer)
+      (message "Outline generated"))))
+
+;;;###autoload
+(defun sb/blog-expand-section ()
+  "Expand the current outline item to prose using AI.
+Place cursor on an outline item, and AI will generate content."
+  (interactive)
+  (unless sb/blog-llm-function
+    (user-error "sb/blog-llm-function not configured"))
+  (let* ((title (save-excursion
+                  (goto-char (point-min))
+                  (when (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
+                    (match-string 1))))
+         (current-line (thing-at-point 'line t))
+         (section-name (when (string-match "^-\\s-*\\[.?\\]\\s-*\\(.+\\)$" current-line)
+                         (match-string 1 current-line)))
+         (prompt (format "Write 2-3 paragraphs for a blog post section.
+Blog title: \"%s\"
+Section: \"%s\"
+
+Write in a clear, conversational technical style. Be specific and practical."
+                         title (or section-name current-line)))
+         (result (funcall sb/blog-llm-function prompt "")))
+    (when result
+      ;; Insert in Draft section
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward "^\\* Draft$" nil t)
+          (goto-char (point-max))
+          (if (re-search-backward "^\\* " nil t)
+              (forward-line 0)
+            (goto-char (point-max)))
+          (insert (format "\n** %s\n\n%s\n"
+                          (or section-name "Section")
+                          result))))
+      (save-buffer)
+      (message "Section expanded"))))
+
+;;;###autoload
+(defun sb/blog-edit-tone (tone)
+  "Rewrite the selected region in the specified TONE using AI.
+Prompts for tone: professional, casual, technical, friendly."
+  (interactive
+   (list (completing-read "Tone: "
+                          '("professional" "casual" "technical" "friendly" "concise")
+                          nil t)))
+  (unless sb/blog-llm-function
+    (user-error "sb/blog-llm-function not configured"))
+  (unless (use-region-p)
+    (user-error "Please select a region first"))
+  (let* ((text (buffer-substring-no-properties (region-beginning) (region-end)))
+         (prompt (format "Rewrite the following text in a %s tone.
+Keep the same meaning but adjust the style. Return only the rewritten text.
+
+Text to rewrite:
+%s" tone text))
+         (result (funcall sb/blog-llm-function prompt "")))
+    (when result
+      (delete-region (region-beginning) (region-end))
+      (insert result)
+      (message "Text rewritten in %s tone" tone))))
+
+;;;###autoload
+(defun sb/blog-link-research ()
+  "Find semantically similar notes and add links to the Research section.
+Uses embeddings to find related notes that aren't already linked."
+  (interactive)
+  (let* ((file (buffer-file-name))
+         (suggestions (sb/core-unlinked-similar file)))
+    (if suggestions
+        (let* ((titles (mapcar (lambda (s)
+                                 (format "%.2f %s"
+                                         (plist-get s :similarity)
+                                         (plist-get s :title)))
+                               suggestions))
+               (selected (completing-read-multiple "Link notes (comma-sep): " titles)))
+          (when selected
+            ;; Find Research section and add links
+            (save-excursion
+              (goto-char (point-min))
+              (when (re-search-forward "^\\* Research$" nil t)
+                (forward-line 1)
+                (dolist (sel selected)
+                  (let* ((title (string-trim (substring sel 5)))  ; Remove similarity prefix
+                         (match (seq-find (lambda (s) (string= (plist-get s :title) title))
+                                          suggestions)))
+                    (when match
+                      (let ((node (sb/--node-from-file (plist-get match :file))))
+                        (when node
+                          (insert (format "- [[id:%s][%s]]\n"
+                                          (org-roam-node-id node)
+                                          title)))))))))
+            (save-buffer)
+            (message "Added %d research links" (length selected))))
+      (message "No similar unlinked notes found"))))
+
+;;;###autoload
+(defun sb/blog-publish ()
+  "Validate and export the current blog post via ox-hugo.
+Sets draft to false and exports to the Hugo content directory."
+  (interactive)
+  (let* ((file (buffer-file-name))
+         (validation-error (sb/--blog-validate file)))
+    (if validation-error
+        (user-error "Cannot publish: %s" validation-error)
+      ;; Set draft to false
+      (sb/--blog-set-draft-value file nil)
+      (revert-buffer t t)
+      ;; Export via ox-hugo
+      (if (fboundp 'org-hugo-export-to-md)
+          (progn
+            (org-hugo-export-to-md)
+            (message "Published! Export complete."))
+        (user-error "ox-hugo not available. Install it with: M-x package-install RET ox-hugo")))))
+
+;;; ============================================================================
 ;;; LIST AND SEARCH COMMANDS
 ;;; ============================================================================
 
@@ -1142,6 +1542,20 @@ Searches across all node types."
 ;;; KEY BINDINGS (C-c b prefix)
 ;;; ============================================================================
 
+(defvar sb/blog-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "b") 'sb/blog)              ; Create new blog post
+    (define-key map (kbd "l") 'sb/blog-list)         ; List blog posts
+    (define-key map (kbd "d") 'sb/blog-set-draft)    ; Toggle draft status
+    (define-key map (kbd "i") 'sb/blog-from-idea)    ; Create from idea
+    (define-key map (kbd "o") 'sb/blog-generate-outline)  ; AI outline
+    (define-key map (kbd "e") 'sb/blog-expand-section)    ; AI expand
+    (define-key map (kbd "t") 'sb/blog-edit-tone)    ; AI tone
+    (define-key map (kbd "r") 'sb/blog-link-research) ; Link research
+    (define-key map (kbd "p") 'sb/blog-publish)      ; Publish
+    map)
+  "Keymap for blog commands under C-c b B.")
+
 (defvar sb/command-map
   (let ((map (make-sparse-keymap)))
     ;; Create commands
@@ -1154,6 +1568,7 @@ Searches across all node types."
     (define-key map (kbd "l p") 'sb/projects)
     (define-key map (kbd "l e") 'sb/people)
     (define-key map (kbd "l i") 'sb/ideas)
+    (define-key map (kbd "l b") 'sb/blog-list)  ; Also accessible via l b
     ;; Search
     (define-key map (kbd "/") 'sb/search)
     ;; Surfacing commands
@@ -1163,6 +1578,8 @@ Searches across all node types."
     (define-key map (kbd "u") 'sb/dangling)
     (define-key map (kbd "L") 'sb/suggest-links)  ;; Capital L for link suggestions
     (define-key map (kbd "w") 'sb/weekly)
+    ;; Blog commands (B prefix)
+    (define-key map (kbd "B") sb/blog-map)
     map)
   "Keymap for Second Brain commands.")
 
