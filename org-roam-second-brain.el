@@ -99,6 +99,43 @@ If nil, AI functions will not be available."
                  (function :tag "LLM function"))
   :group 'sb)
 
+(defcustom sb/daily-auto-link-mode 'first-only
+  "Controls when daily auto-linking runs.
+- 'first-only: Only add Related Notes on first substantial entry
+- 'adaptive: Update when content changes significantly
+- 'always: Update on every save
+- 'manual: Never auto-link, only manual via sb/daily-link"
+  :type '(choice (const :tag "First entry only" first-only)
+                 (const :tag "Adaptive" adaptive)
+                 (const :tag "Always" always)
+                 (const :tag "Manual only" manual))
+  :group 'sb)
+
+(defcustom sb/daily-link-types 'both
+  "What types of notes dailies should link to.
+- 'both: Link to dailies and concept notes
+- 'dailies-only: Only link to other daily files
+- 'concepts-only: Only link to non-daily org-roam files"
+  :type '(choice (const :tag "Both" both)
+                 (const :tag "Dailies only" dailies-only)
+                 (const :tag "Concepts only" concepts-only))
+  :group 'sb)
+
+(defcustom sb/daily-max-concept-links 8
+  "Maximum concept note links in Related Notes section."
+  :type 'integer
+  :group 'sb)
+
+(defcustom sb/daily-max-daily-links 5
+  "Maximum daily note links in Related Notes section."
+  :type 'integer
+  :group 'sb)
+
+(defcustom sb/daily-min-content-length 200
+  "Minimum content length (chars) before auto-linking triggers."
+  :type 'integer
+  :group 'sb)
+
 ;;; ============================================================================
 ;;; INTERNAL HELPERS
 ;;; ============================================================================
@@ -214,6 +251,30 @@ If nil, AI functions will not be available."
      (message "Warning: Failed to generate embeddings: %s"
               (error-message-string err))
      nil)))
+
+(defun sb/--is-daily-file-p (file)
+  "Check if FILE is in the daily directory."
+  (and file (string-match-p "/daily/" file)))
+
+(defun sb/--daily-has-related-section-p ()
+  "Check if current buffer has a Related Notes section."
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* Related Notes" nil t)))
+
+(defun sb/--daily-remove-related-section ()
+  "Remove existing Related Notes section from current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\*\\* Related Notes" nil t)
+      (let ((start (match-beginning 0)))
+        (forward-line 1)
+        (while (and (not (eobp))
+                    (or (looking-at "^- \\[\\[")
+                        (looking-at "^\\*\\*\\* ")
+                        (looking-at "^$")))
+          (forward-line 1))
+        (delete-region start (point))))))
 
 ;;; ============================================================================
 ;;; CORE FUNCTIONS (return elisp data structures)
@@ -475,6 +536,45 @@ Returns plist with all digest information."
                                 :projects stale)
           :dangling-links (list :total (length dangling)
                                 :items (seq-take dangling 5)))))
+
+(defun sb/core-daily-related-notes (file &optional threshold)
+  "Find notes related to daily FILE for auto-linking.
+Returns plist with :concepts and :dailies lists, each containing
+(:file :title :similarity :id) plists."
+  (when (and (fboundp 'org-roam-semantic-get-similar-data)
+             (sb/--is-daily-file-p file))
+    (let* ((threshold (or threshold sb/similarity-threshold))
+           (content (with-temp-buffer
+                      (insert-file-contents file)
+                      (buffer-string)))
+           (similar (org-roam-semantic-get-similar-data content 20 threshold))
+           (existing-links (make-hash-table :test 'equal))
+           (concepts '())
+           (dailies '()))
+      ;; Exclude self
+      (puthash file t existing-links)
+      ;; Classify and filter results
+      (dolist (result similar)
+        (let* ((sim-file (car result))
+               (similarity (cadr result))
+               (is-daily (sb/--is-daily-file-p sim-file)))
+          (unless (gethash sim-file existing-links)
+            (let* ((title (org-roam-semantic--get-title sim-file))
+                   (node-id (org-roam-semantic--get-node-id sim-file))
+                   (entry (list :file sim-file
+                                :title title
+                                :similarity similarity
+                                :id node-id)))
+              (if is-daily
+                  (push entry dailies)
+                (push entry concepts))))))
+      ;; Filter by link-types preference
+      (pcase sb/daily-link-types
+        ('dailies-only (setq concepts nil))
+        ('concepts-only (setq dailies nil)))
+      ;; Apply limits
+      (list :concepts (seq-take (nreverse concepts) sb/daily-max-concept-links)
+            :dailies (seq-take (nreverse dailies) sb/daily-max-daily-links)))))
 
 ;;; ============================================================================
 ;;; BLOG POST FUNCTIONS
@@ -1502,6 +1602,113 @@ Searches across all node types."
     (display-buffer buf)))
 
 ;;; ============================================================================
+;;; DAILY AUTO-LINKING COMMANDS
+;;; ============================================================================
+
+;;;###autoload
+(defun sb/daily-link (&optional file)
+  "Add or update Related Notes section in daily FILE.
+If FILE is nil, uses current buffer's file."
+  (interactive)
+  (let* ((file (or file (buffer-file-name)))
+         (data (sb/core-daily-related-notes file)))
+    (unless (sb/--is-daily-file-p file)
+      (user-error "Not a daily file"))
+    (when (or (plist-get data :concepts) (plist-get data :dailies))
+      (with-current-buffer (find-file-noselect file)
+        (save-excursion
+          ;; Remove existing section
+          (sb/--daily-remove-related-section)
+          ;; Add new section at end
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert "\n** Related Notes\n")
+          ;; Concepts first
+          (when-let ((concepts (plist-get data :concepts)))
+            (insert "*** Concept Notes\n")
+            (dolist (c concepts)
+              (insert (format "- [[id:%s][%s]] (%.3f)\n"
+                              (plist-get c :id)
+                              (plist-get c :title)
+                              (plist-get c :similarity))))
+            (insert "\n"))
+          ;; Then dailies
+          (when-let ((dailies (plist-get data :dailies)))
+            (insert "*** Related Days\n")
+            (dolist (d dailies)
+              (let ((date (file-name-sans-extension
+                           (file-name-nondirectory (plist-get d :file)))))
+                (insert (format "- [[id:%s][%s]] (%.3f)\n"
+                                (plist-get d :id)
+                                date
+                                (plist-get d :similarity)))))
+            (insert "\n")))
+        (message "Linked %d concepts and %d dailies"
+                 (length (plist-get data :concepts))
+                 (length (plist-get data :dailies)))))))
+
+;;;###autoload
+(defun sb/daily-link-all (&optional threshold)
+  "Batch process all daily files to add Related Notes.
+With prefix arg, prompts for similarity THRESHOLD."
+  (interactive "P")
+  (let* ((threshold (if threshold
+                        (read-number "Similarity threshold: " sb/similarity-threshold)
+                      sb/similarity-threshold))
+         (daily-dir (expand-file-name "daily" org-roam-directory))
+         (files (directory-files daily-dir t "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org$"))
+         (processed 0)
+         (linked 0))
+    (message "Processing %d daily files..." (length files))
+    (dolist (file files)
+      (let ((initial-size (with-temp-buffer
+                            (insert-file-contents file)
+                            (buffer-size))))
+        (sb/daily-link file)
+        (let ((new-size (with-temp-buffer
+                          (insert-file-contents file)
+                          (buffer-size))))
+          (when (> new-size initial-size)
+            (cl-incf linked))))
+      (cl-incf processed)
+      (when (zerop (mod processed 10))
+        (message "Processed %d/%d..." processed (length files))))
+    (message "Done: %d files processed, %d updated" processed linked)))
+
+;;;###autoload
+(defun sb/daily-connections ()
+  "Show connection report for all daily files."
+  (interactive)
+  (let* ((daily-dir (expand-file-name "daily" org-roam-directory))
+         (files (directory-files daily-dir t "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org$"))
+         (connections '())
+         (buf (get-buffer-create "*Daily Connections*")))
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (let ((count 0))
+          (goto-char (point-min))
+          (while (re-search-forward "\\[\\[id:[^]]+\\]\\[[^]]+\\]\\]" nil t)
+            (cl-incf count))
+          (push (cons (file-name-sans-extension (file-name-nondirectory file)) count)
+                connections))))
+    (setq connections (sort connections (lambda (a b) (> (cdr a) (cdr b)))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (sb/buffer-mode)
+        (setq sb/buffer-type 'daily-connections)
+        (insert (propertize "Daily Connections Report\n\n" 'face 'bold))
+        (insert (format "Total daily files: %d\n" (length files)))
+        (insert (format "Files with links: %d\n\n"
+                        (length (seq-filter (lambda (x) (> (cdr x) 0)) connections))))
+        (dolist (conn connections)
+          (insert (format "  %s: %d links\n" (car conn) (cdr conn))))
+        (insert "\nKeys: q=quit\n")
+        (goto-char (point-min))))
+    (display-buffer buf)))
+
+;;; ============================================================================
 ;;; PROACTIVE FEATURES
 ;;; ============================================================================
 
@@ -1522,6 +1729,28 @@ Searches across all node types."
   (when sb/show-digest-on-startup
     (run-with-idle-timer 2 nil #'sb/digest)))
 
+(defun sb/--maybe-auto-link-daily ()
+  "Auto-link daily file on save if configured."
+  (when (and (derived-mode-p 'org-mode)
+             (buffer-file-name)
+             (sb/--is-daily-file-p (buffer-file-name))
+             (> (buffer-size) sb/daily-min-content-length)
+             (not (eq sb/daily-auto-link-mode 'manual)))
+    (let ((should-link
+           (pcase sb/daily-auto-link-mode
+             ('first-only (not (sb/--daily-has-related-section-p)))
+             ('adaptive (not (sb/--daily-has-related-section-p)))
+             ('always t))))
+      (when should-link
+        ;; Use timer to run after save completes
+        (run-with-timer 0.5 nil
+                        (lambda (f)
+                          (when (get-file-buffer f)
+                            (with-current-buffer (get-file-buffer f)
+                              (sb/daily-link f)
+                              (save-buffer))))
+                        (buffer-file-name))))))
+
 ;;; ============================================================================
 ;;; DOOM EMACS INTEGRATION
 ;;; ============================================================================
@@ -1537,6 +1766,9 @@ Searches across all node types."
 
 ;; Proactive suggestions hook
 (add-hook 'org-roam-find-file-hook #'sb/--maybe-show-suggestions)
+
+;; Daily auto-linking hook
+(add-hook 'after-save-hook #'sb/--maybe-auto-link-daily)
 
 ;;; ============================================================================
 ;;; KEY BINDINGS (C-c b prefix)
@@ -1555,6 +1787,14 @@ Searches across all node types."
     (define-key map (kbd "p") 'sb/blog-publish)      ; Publish
     map)
   "Keymap for blog commands under C-c b B.")
+
+(defvar sb/daily-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "l") 'sb/daily-link)        ; Link current daily
+    (define-key map (kbd "L") 'sb/daily-link-all)    ; Batch link all
+    (define-key map (kbd "c") 'sb/daily-connections) ; Show connections
+    map)
+  "Keymap for daily commands under C-c b D.")
 
 (defvar sb/command-map
   (let ((map (make-sparse-keymap)))
@@ -1580,6 +1820,8 @@ Searches across all node types."
     (define-key map (kbd "w") 'sb/weekly)
     ;; Blog commands (B prefix)
     (define-key map (kbd "B") sb/blog-map)
+    ;; Daily commands (D prefix)
+    (define-key map (kbd "D") sb/daily-map)
     map)
   "Keymap for Second Brain commands.")
 
