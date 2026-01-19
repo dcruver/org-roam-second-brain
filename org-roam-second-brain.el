@@ -526,7 +526,8 @@ Returns plist with all digest information."
   (let ((active (sb/core-active-projects))
         (followups (sb/core-pending-followups))
         (stale (sb/core-stale-projects))
-        (dangling (sb/core-dangling-person-links)))
+        (dangling (sb/core-dangling-person-links))
+        (blog (sb/core-blog-digest-data)))
     (list :generated-at (format-time-string "%Y-%m-%d %H:%M:%S")
           :active-projects (list :total (length active)
                                  :top-3 (seq-take active 3))
@@ -535,7 +536,8 @@ Returns plist with all digest information."
           :stale-projects (list :total (length stale)
                                 :projects stale)
           :dangling-links (list :total (length dangling)
-                                :items (seq-take dangling 5)))))
+                                :items (seq-take dangling 5))
+          :blog blog)))
 
 (defun sb/core-daily-related-notes (file &optional threshold)
   "Find notes related to daily FILE for auto-linking.
@@ -710,6 +712,81 @@ Returns nil if valid, or a string describing the issue."
                    sb/hugo-sections))
       (format "Invalid section: %s" export-section))
      (t nil))))
+
+(defun sb/--blog-has-content (file)
+  "Check if blog FILE has substantial content beyond template."
+  (when (and file (file-exists-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      ;; Look for Draft section with content
+      (when (re-search-forward "^\\* Draft" nil t)
+        (let ((start (point)))
+          (if (re-search-forward "^\\* " nil t)
+              (> (- (match-beginning 0) start) 50)
+            (> (- (point-max) start) 50)))))))
+
+(defun sb/--blog-outline-progress (file)
+  "Get outline progress for blog FILE as (completed . total)."
+  (when (and file (file-exists-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let ((checked 0) (unchecked 0))
+        (when (re-search-forward "^\\* Outline" nil t)
+          (let ((end (save-excursion
+                       (if (re-search-forward "^\\* " nil t)
+                           (match-beginning 0)
+                         (point-max)))))
+            (while (re-search-forward "^- \\[\\(.\\)\\]" end t)
+              (if (string= (match-string 1) "X")
+                  (cl-incf checked)
+                (cl-incf unchecked)))))
+        (cons checked (+ checked unchecked))))))
+
+(defun sb/core-blog-digest-data ()
+  "Gather blog-related data for daily digest.
+Returns plist with :drafts, :unpublished, and :ideas-for-blog."
+  (let* ((all-posts (sb/core-blog-posts))
+         (drafts (seq-filter (lambda (p) (plist-get p :draft)) all-posts))
+         (published (seq-filter (lambda (p) (not (plist-get p :draft))) all-posts))
+         (ideas (sb/core-nodes-by-type 'idea)))
+    ;; Enrich drafts with progress info
+    (setq drafts
+          (mapcar (lambda (d)
+                    (let* ((file (plist-get d :file))
+                           (progress (sb/--blog-outline-progress file))
+                           (has-content (sb/--blog-has-content file)))
+                      (append d (list :progress progress
+                                      :has-content has-content))))
+                  drafts))
+    ;; Filter ideas that could make good blog posts (have interesting titles)
+    ;; Exclude ideas that already have a blog post with similar title
+    (let ((blog-titles (mapcar (lambda (p) (downcase (plist-get p :title))) all-posts)))
+      (setq ideas
+            (seq-filter
+             (lambda (idea)
+               (let* ((title (plist-get idea :title))
+                      (title-lower (downcase title)))
+                 ;; Keep ideas that:
+                 ;; 1. Don't already have a matching blog post
+                 ;; 2. Have a title longer than 10 chars (meaningful)
+                 (and (> (length title) 10)
+                      (not (member title-lower blog-titles))
+                      ;; Check for idea-like titles (opinions, insights)
+                      (or (string-match-p "\\b\\(why\\|how\\|what\\|the\\)\\b" title-lower)
+                          (> (length title) 30)))))
+             ideas)))
+    (list :drafts (list :total (length drafts)
+                        :items drafts)
+          :published (list :total (length published)
+                           :recent (seq-take
+                                    (seq-sort-by (lambda (p)
+                                                   (plist-get p :days-since-modified))
+                                                 #'< published)
+                                    3))
+          :ideas-for-blog (list :total (length ideas)
+                                :items (seq-take ideas 5)))))
 
 ;;; ============================================================================
 ;;; BUFFER MODE (for digest and suggestions displays)
@@ -1033,6 +1110,53 @@ When called interactively, prompts for both."
                          (plist-get p :days-since-modified))
                  p 0))
             (insert "  All projects recently active\n"))
+          (insert "\n"))
+
+        ;; Blog Status
+        (let* ((blog (plist-get data :blog))
+               (drafts (plist-get blog :drafts))
+               (published (plist-get blog :published))
+               (ideas (plist-get blog :ideas-for-blog)))
+          (insert (propertize "Blog Status\n" 'face 'bold))
+          ;; Drafts in progress
+          (let ((draft-items (plist-get drafts :items)))
+            (if (> (length draft-items) 0)
+                (progn
+                  (insert (format "  Drafts (%d):\n" (plist-get drafts :total)))
+                  (dolist (d (seq-take draft-items 3))
+                    (let* ((progress (plist-get d :progress))
+                           (checked (car progress))
+                           (total-items (cdr progress))
+                           (has-content (plist-get d :has-content))
+                           (status (cond
+                                    ((and has-content (= checked total-items)) "ready to publish")
+                                    (has-content (format "%d/%d outline" checked total-items))
+                                    (t "needs content"))))
+                      (sb/--insert-item
+                       (format "    %s [%s]"
+                               (plist-get d :title)
+                               status)
+                       d 0))))
+              (insert "  No drafts in progress\n")))
+          ;; Recently published
+          (when-let ((recent (plist-get published :recent)))
+            (when (> (length recent) 0)
+              (insert (format "  Published (%d total):\n" (plist-get published :total)))
+              (dolist (p recent)
+                (sb/--insert-item
+                 (format "    %s (%d days ago)"
+                         (plist-get p :title)
+                         (plist-get p :days-since-modified))
+                 p 0))))
+          ;; Ideas that could be posts
+          (let ((idea-items (plist-get ideas :items)))
+            (when (> (length idea-items) 0)
+              (insert (format "  Ideas for posts (%d):\n" (plist-get ideas :total)))
+              (dolist (idea (seq-take idea-items 3))
+                (sb/--insert-item
+                 (format "    %s"
+                         (truncate-string-to-width (plist-get idea :title) 50))
+                 idea 0))))
           (insert "\n"))
 
         ;; Footer
