@@ -12,10 +12,21 @@ Create notes with predefined structures:
 - **Admin** - Track administrative tasks with due dates
 
 ### Proactive Surfacing
-- **Daily Digest** - See active projects, pending follow-ups, and stale items at a glance
+- **Daily Digest** - See active projects, pending follow-ups, stale items, and blog status at a glance
 - **Stale Projects** - Find projects that haven't been touched recently
 - **Pending Follow-ups** - Track unchecked items mentioning people
 - **Dangling Links** - Find `[[Name]]` links without corresponding person nodes
+- **Blog Status** - Track drafts, published posts, and ideas that could become posts
+
+### Blog Management
+- **Create Posts** - Create blog posts with Hugo export metadata
+- **Draft Tracking** - Track outline progress and content status
+- **AI Assistance** - Generate outlines, expand sections, adjust tone
+- **Publish Workflow** - Validate and publish posts
+
+### Daily Auto-Linking
+- **Semantic Connections** - Automatically link daily notes to related concepts
+- **Cross-Day Links** - Find connections between daily entries across time
 
 ### Semantic Search
 - **Link Suggestions** - Find semantically similar notes that aren't already linked
@@ -36,10 +47,41 @@ Create notes with predefined structures:
 ;; In packages.el
 (package! org-roam-second-brain
   :recipe (:host github :repo "dcruver/org-roam-second-brain"))
+```
 
+```elisp
 ;; In config.el
+(setq org-roam-directory (file-truename "~/org-roam"))
+
+;; Load org-roam-second-brain after org-roam
 (use-package! org-roam-second-brain
   :after org-roam)
+
+;; Configure embedding server (required for semantic features)
+(after! org-roam-vector-search
+  (setq org-roam-semantic-embedding-url "http://localhost:8080")
+  (setq org-roam-semantic-embedding-model "nomic-ai/nomic-embed-text-v1.5"))
+```
+
+Then run `doom sync`.
+
+### Updating the Package
+
+To update to the latest version:
+
+```bash
+doom sync -u
+```
+
+Or rebuild just this package:
+
+```elisp
+M-x straight-rebuild-package RET org-roam-second-brain RET
+```
+
+Or via command line:
+```bash
+emacsclient --eval '(straight-rebuild-package "org-roam-second-brain")'
 ```
 
 ## Configuration
@@ -85,6 +127,11 @@ Or use `M-x customize-group RET sb RET`.
 | `C-c b l p` | `sb/projects` | List all projects |
 | `C-c b l e` | `sb/people` | List all people |
 | `C-c b l i` | `sb/ideas` | List all ideas |
+| `C-c b B` | `sb/blog` | Create a blog post |
+| `C-c b l b` | `sb/blog-list` | List all blog posts |
+| `C-c b D l` | `sb/daily-link` | Link current daily to related notes |
+| `C-c b D L` | `sb/daily-link-all` | Batch link all daily files |
+| `C-c b D c` | `sb/daily-connections` | Show daily connections report |
 
 ### Buffer Navigation (in result buffers)
 
