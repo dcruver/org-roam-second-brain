@@ -9,45 +9,37 @@
 ;;
 ;;; Code:
 
-;;;; TODO Keywords
-(after! org
-  (setq org-todo-keywords
-        '((sequence "TODO(t)" "IN-PROGRESS(i)" "BLOCKED(b)" "|" "DONE(d)" "CANCELLED(c)")))
-  
-  ;; Log state changes with timestamps
-  (setq org-log-done 'time)
-  (setq org-log-into-drawer t))
 
 ;;;; Agenda Configuration
 (after! org-agenda
   ;; Point agenda at org-roam projects
-  (setq org-agenda-files (list (expand-file-name "projects/" org-roam-directory)
-                               (expand-file-name "admin/" org-roam-directory)))
+  (setq! org-agenda-files (list (expand-file-name "projects/" org-roam-directory)
+                                (expand-file-name "admin/" org-roam-directory)))
   
   ;; Custom agenda views
-  (setq org-agenda-custom-commands
-        '(("p" "Projects Overview"
-           ((tags-todo "+TODO=\"IN-PROGRESS\""
-                       ((org-agenda-overriding-header "🔄 In Progress")))
-            (tags-todo "+TODO=\"BLOCKED\""
-                       ((org-agenda-overriding-header "⛔ Blocked")))
-            (tags-todo "+TODO=\"TODO\"+PRIORITY=\"A\""
-                       ((org-agenda-overriding-header "⚡ High Priority TODO")))
-            (tags-todo "+TODO=\"TODO\""
-                       ((org-agenda-overriding-header "📋 All TODOs")
-                        (org-agenda-sorting-strategy '(priority-down))))))
-          
-          ("b" "Blocked Items"
-           tags-todo "+TODO=\"BLOCKED\""
-           ((org-agenda-overriding-header "⛔ Blocked Tasks Across All Projects")))
-          
-          ("i" "In Progress"
-           tags-todo "+TODO=\"IN-PROGRESS\""
-           ((org-agenda-overriding-header "🔄 Currently Working On")))
-          
-          ("h" "High Priority"
-           tags-todo "+PRIORITY=\"A\""
-           ((org-agenda-overriding-header "⚡ High Priority Tasks"))))))
+  (setq! org-agenda-custom-commands
+         '(("p" "Projects Overview"
+            ((tags-todo "+TODO=\"IN-PROGRESS\""
+                        ((org-agenda-overriding-header "🔄 In Progress")))
+             (tags-todo "+TODO=\"BLOCKED\""
+                        ((org-agenda-overriding-header "⛔ Blocked")))
+             (tags-todo "+TODO=\"TODO\"+PRIORITY=\"A\""
+                        ((org-agenda-overriding-header "⚡ High Priority TODO")))
+             (tags-todo "+TODO=\"TODO\""
+                        ((org-agenda-overriding-header "📋 All TODOs")
+                         (org-agenda-sorting-strategy '(priority-down))))))
+           
+           ("b" "Blocked Items"
+            tags-todo "+TODO=\"BLOCKED\""
+            ((org-agenda-overriding-header "⛔ Blocked Tasks Across All Projects")))
+           
+           ("i" "In Progress"
+            tags-todo "+TODO=\"IN-PROGRESS\""
+            ((org-agenda-overriding-header "🔄 Currently Working On")))
+           
+           ("h" "High Priority"
+            tags-todo "+PRIORITY=\"A\""
+            ((org-agenda-overriding-header "⚡ High Priority Tasks"))))))
 
 ;;;; Journal Integration - Log state changes to daily notes
 (defun my/org-roam-log-state-change-to-daily ()
@@ -95,14 +87,7 @@
 ;;;; Programmatic State Changes (for external tools like Nabu)
 (defun my/org-roam-change-task-state (file heading new-state)
   "Change the TODO state of HEADING in FILE to NEW-STATE.
-Use this from emacsclient to trigger hooks properly.
-
-Example:
-  emacsclient --eval '(my/org-roam-change-task-state 
-    \"~/org-roam/projects/my-project.org\" 
-    \"Fix the bug\" 
-    \"IN-PROGRESS\")'
-"
+Use this from emacsclient to trigger hooks properly."
   (with-current-buffer (find-file-noselect (expand-file-name file))
     (goto-char (point-min))
     (if (re-search-forward (concat "^\\*+ \\(TODO\\|IN-PROGRESS\\|BLOCKED\\|DONE\\|CANCELLED\\) "
@@ -110,7 +95,7 @@ Example:
         (progn
           (org-todo new-state)
           (save-buffer)
-          (format "Changed %s to %s" heading new-state))
+          (format "Changed '%s' to %s" heading new-state))
       (error "Could not find task: %s" heading))))
 
 (provide 'org-agenda-project-tracking)
