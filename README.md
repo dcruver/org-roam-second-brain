@@ -170,7 +170,40 @@ Then configure:
 
 - `org-roam-vector-search.el` - Vector embeddings and semantic search
 - `org-roam-second-brain.el` - Structured notes and proactive surfacing
+- `org-roam-api.el` - API functions for MCP server integration
+- `org-roam-api.el` - API functions for MCP server integration
 
 ## License
 
 GPL-3.0
+
+## MCP Server Integration
+
+This package includes `org-roam-api.el`, which provides the API functions used by [org-roam-mcp](https://github.com/dcruver/org-roam-ai) — a Python MCP server for external tool integration.
+
+### Loading the API
+
+```elisp
+(require 'org-roam-api)
+```
+
+### What it provides
+
+The `my/api-*` functions return JSON-formatted responses for:
+- **Search**: semantic_search, contextual_search, search_notes
+- **CRUD**: create_note, read_note, update_note, delete_note
+- **Tasks**: change_task_state, list_notes, get_note_properties
+- **Daily**: add_daily_entry, get_daily_content
+- **Surfacing**: get_digest_data, get_active_projects, get_stale_projects, etc.
+
+### MCP Server Setup
+
+To expose these functions via HTTP/JSON-RPC:
+
+```bash
+pip install org-roam-mcp
+export EMACS_SERVER_FILE=~/emacs-server/server
+org-roam-mcp --port 8001
+```
+
+See [org-roam-ai](https://github.com/dcruver/org-roam-ai) for full MCP server documentation.

@@ -14,6 +14,9 @@
 ;;
 ;; This package provides both interactive commands for direct Emacs use
 ;; and core functions that can be wrapped by API layers.
+;;
+;; Also includes org-roam-api.el for MCP server integration.
+;; Load it with: (require 'org-roam-api)
 
 ;;; Code:
 
