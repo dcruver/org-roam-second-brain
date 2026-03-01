@@ -160,7 +160,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "add_daily_entry",
-        "description": "Add structured entry to daily note",
+        "description": "Add structured entry to daily note. Points should contain substantive content — the details, context, and reasoning worth remembering.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -312,7 +312,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "create_project",
-        "description": "Create a project node with structured fields for tracking status and next actions",
+        "description": "Create a project node. Always include substantive context in the notes field — an empty project with just a title is useless. Capture the why, what was discussed, key details, and next steps.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -332,19 +332,19 @@ TOOL_SCHEMAS = [
                 },
                 "notes": {
                     "type": "string",
-                    "description": "Additional notes about this project"
+                    "description": "Main content and context for this project — conversations, research, decisions, rationale. Always include relevant context from the discussion that led to creating this note."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Full org-mode content (if provided, replaces template-based creation)"
+                    "description": "Full org-mode content (advanced: replaces template-based creation). Prefer using notes field instead."
                 }
             },
-            "required": ["title"]
+            "required": ["title", "notes"]
         }
     },
     {
         "name": "create_idea",
-        "description": "Create an idea node with a one-liner summary and optional elaboration",
+        "description": "Create an idea node. Always include a meaningful one_liner and elaboration with full context — capture the insight and reasoning, not just a label.",
         "inputSchema": {
             "type": "object",
             "properties": {
