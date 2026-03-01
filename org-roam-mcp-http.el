@@ -562,13 +562,15 @@ Accumulates data across multiple filter calls to handle chunked delivery."
                (body (substring buf body-start))
                (cl-val (when (string-match "[Cc]ontent-[Ll]ength: *\\([0-9]+\\)" headers)
                          (string-to-number (match-string 1 headers))))
-               (body-complete (or (null cl-val) (>= (length body) cl-val)))
+               (body-complete (or (null cl-val) (>= (string-bytes body) cl-val)))
                (first-nl (or (string-match "\r?\n" headers) (length headers)))
                (method-line (substring headers 0 first-nl)))
           ;; Wait for full body before processing
           (when body-complete
-            (when cl-val
-              (setq body (substring body 0 (min (length body) cl-val))))
+            ;; Trim body to content-length (byte-aware for multibyte strings)
+            (when (and cl-val (> (string-bytes body) cl-val))
+              (let ((encoded (encode-coding-string body 'utf-8)))
+                (setq body (decode-coding-string (substring encoded 0 cl-val) 'utf-8))))
             (cond
              ((string-prefix-p "OPTIONS" method-line)
               (process-send-string proc
