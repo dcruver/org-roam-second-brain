@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "org-roam-mcp"
+version = "0.1.16"
+description = "MCP server for org-roam knowledge management. Provides AI agent tools for semantic search, note creation, and daily entries. Install with: pip install org-roam-mcp or curl -fsSL https://raw.githubusercontent.com/dcruver/org-roam-ai/main/install.sh | bash"
+authors = [
+    {name = "dcruver", email = "dcruver@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["org-roam", "mcp", "knowledge-management", "emacs", "n8n"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "typing-extensions>=4.0.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dcruver/org-roam-ai"
+Repository = "https://github.com/dcruver/org-roam-ai"
+Issues = "https://github.com/dcruver/org-roam-ai/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+build = [
+    "build>=0.10.0",
+    "twine>=4.0.0",
+]
+
+[project.scripts]
+org-roam-mcp = "org_roam_mcp.server:cli_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+select = ["E", "F", "W", "I", "N", "UP", "YTT", "ANN", "S", "BLE", "FBT", "B", "A", "COM", "C4", "DTZ", "T10", "EM", "EXE", "ISC", "ICN", "G", "INP", "PIE", "T20", "PYI", "PT", "Q", "RSE", "RET", "SLF", "SIM", "TID", "TCH", "ARG", "PTH", "ERA", "PD", "PGH", "PL", "TRY", "NPY", "RUF"]
+ignore = ["ANN101", "ANN102", "S101", "PLR0913"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true

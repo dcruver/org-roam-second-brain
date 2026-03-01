@@ -1,0 +1,1108 @@
+{
+  "name": "Element-Matrix AI Chatbot (org-roam version)",
+  "nodes": [
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.response || $json.output || $json.stdout || 'Processing completed' }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -1744,
+        1256
+      ],
+      "id": "0cdb3ea8-9afb-43bc-b139-0ead43bd50b7",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "d58e25ad-79f7-4d89-aad3-b9af05f6444f",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -4272,
+        1160
+      ],
+      "id": "b58a7813-aa65-4237-b6d0-13bfe667e3ac",
+      "name": "Computra Webhook",
+      "webhookId": "d58e25ad-79f7-4d89-aad3-b9af05f6444f"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -4272,
+        1352
+      ],
+      "id": "4fbd1dcb-6e6b-4901-8ec5-eab7a0893ce7",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "command": "=emacsclient --server-file=/root/emacs-server/server --eval \"(org-roam-db-sync 'force)\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -3248,
+        560
+      ],
+      "id": "47057c45-ac8f-4252-96ae-9fbc96e4805c",
+      "name": "Sync org-roam DB"
+    },
+    {
+      "parameters": {
+        "jsCode": "let response = \"\";\n\ntry {\n  const rawStdout = $input.first().json.stdout;\n  console.log('Raw stdout:', rawStdout);\n  \n  // If JSON.parse creates a character array, reconstruct the string and parse again\n  let createResult = JSON.parse(rawStdout);\n  console.log('First parse object keys:', Object.keys(createResult));\n  \n  // Check if we got a character array (keys are numbers)\n  if (Object.keys(createResult)[0] === '0') {\n    console.log('Got character array, reconstructing...');\n    // Reconstruct the JSON string from character array\n    const reconstructed = Object.values(createResult).join('');\n    console.log('Reconstructed string:', reconstructed);\n    createResult = JSON.parse(reconstructed);\n    console.log('Second parse result:', createResult);\n  }\n  \n  console.log('Final object keys:', Object.keys(createResult));\n  console.log('Success property:', createResult.success);\n  \n  if (createResult.success === true) {\n    const title = createResult.note?.title || 'New Note';\n    response = `✅ Note created: \"${title}\"\\n💡 Enhance with C-c a f in Emacs`;\n    console.log('Success path taken');\n  } else {\n    response = `❌ Failed to create note: ${createResult.message || 'Unknown error'}`;\n    console.log('Failure path taken');\n  }\n} catch (e) {\n  console.log('Exception occurred:', e);\n  response = `❌ Error creating note: ${e.message}`;\n}\n\nreturn { response: response };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2032,
+        560
+      ],
+      "id": "47091d70-b16b-4fd8-a956-1881af1a77ae",
+      "name": "Create Response Formatter"
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2024,
+        1376
+      ],
+      "id": "9593c8de-4f8c-44c4-9f84-b5c8fe805dc1",
+      "name": "Ollama Chat Model3",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = $('Message Extractor').first().json.body.message || '';\nconst timestamp = new Date($input.first().json.timestamp || Date.now());\n\nreturn [{\n  originalMessage: message.trim(),\n  timestamp: timestamp.toISOString(),\n}];"
+      },
+      "id": "b34240d3-ae6a-494d-80be-345dc5f7ca8e",
+      "name": "Process Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        -2672,
+        2056
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2440,
+        2280
+      ],
+      "id": "3b5d2db3-36d9-412e-90d2-016495b647dd",
+      "name": "Ollama Chat Model4",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Youtube Transcript').item.json.full_text }}",
+        "options": {
+          "systemMessage": "Summarize this video and rate how accurate/reliable the information is (ACCURATE/MOSTLY ACCURATE/QUESTIONABLE/INACCURATE). Briefly explain the rating."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -2096,
+        1152
+      ],
+      "id": "4b89b22a-0228-444d-9055-c30fc88be352",
+      "name": "Youtube Video Summarizer"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json }}",
+        "options": {
+          "systemMessage": "  You are a journal entry assistant. Analyze the user's message and create ONE daily entry.\n\n  ## Analysis Rules:\n  - **JOURNAL** (entry_type=\"journal\"): Past events, completed actions (past tense)\n  - **TODO** (entry_type=\"todo\"): Future tasks, things to do (future tense)\n\n  ## Your Process:\n  1. Analyze message for verb tense\n  2. Create short title (under 60 chars)\n  3. Extract 1-3 main points\n  4. Add 0-2 next steps if relevant\n  5. Add 1-3 relevant tags\n  6. Get current time in HH:MM format\n  7. Call add_daily_entry tool ONCE\n  8. Return the tool's response as your final answer\n\n  ## CRITICAL: After calling add_daily_entry, you MUST respond with:\n  Final Answer: [exact tool response]\n\n  Example:\n  Final Answer: ✅ **TODO** added to daily note: Evaluate Goose with Qwen3-coder\n\n  **DO NOT call the tool multiple times. ONE call only, then give final answer.**\n",
+          "maxIterations": 1,
+          "returnIntermediateSteps": true
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -2448,
+        2056
+      ],
+      "id": "1a4fbcaf-79ce-4727-91eb-cf8c6d54759c",
+      "name": "Journal Entry Generator",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2376,
+        1776
+      ],
+      "id": "a009fff7-82cd-4ba2-83d4-9fa467fe92e1",
+      "name": "Ollama Chat Model6",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Extract or generate a concise, descriptive title for this YouTube video based on the transcript content. The title should be suitable for a technical note.\n\nTranscript: {{ $json.full_text }}\n\nReturn only the title, nothing else. Make it specific and informative (e.g., \"Docker Compose Tutorial - Multi-Container Setup\" instead of just \"Docker Video\").",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -2448,
+        1552
+      ],
+      "id": "8536767c-3275-49dd-949a-2c27fda62e87",
+      "name": "Youtube Title Extractor"
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = $('Message Extractor').first().json.body.message\n\n// Comprehensive YouTube URL regex patterns\nconst youtubePatterns = [\n  // Standard youtube.com URLs\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,\n  // Shortened youtu.be URLs  \n  /(?:https?:\\/\\/)?youtu\\.be\\/([a-zA-Z0-9_-]{11})/,\n  // YouTube URLs with additional parameters\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/watch\\?.*v=([a-zA-Z0-9_-]{11})/,\n  // YouTube mobile URLs\n  /(?:https?:\\/\\/)?m\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,\n  // YouTube embed URLs\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/embed\\/([a-zA-Z0-9_-]{11})/\n];\n\nlet extractedUrl = null;\nlet videoId = null;\n\n// Try each pattern to find a YouTube URL\nfor (const pattern of youtubePatterns) {\n  const match = message.match(pattern);\n  if (match) {\n    videoId = match[1];\n    extractedUrl = `https://www.youtube.com/watch?v=${videoId}`;\n    break;\n  }\n}\n\nif (!extractedUrl) {\n  // If no URL found, check if the entire message might be just a video ID\n  const videoIdPattern = /^[a-zA-Z0-9_-]{11}$/;\n  if (videoIdPattern.test(message.trim())) {\n    videoId = message.trim();\n    extractedUrl = `https://www.youtube.com/watch?v=${videoId}`;\n  }\n}\n\nreturn {\n  originalMessage: message,\n  extractedUrl: extractedUrl,\n  videoId: videoId,\n  hasUrl: !!extractedUrl\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2672,
+        1256
+      ],
+      "id": "2ea5c255-5d13-4cd2-8346-beaf7542f335",
+      "name": "Extract Youtube URL"
+    },
+    {
+      "parameters": {
+        "videoUrl": "={{ $('Extract Youtube URL').item.json.extractedUrl }}",
+        "language": "en",
+        "additionalOptions": {
+          "formatOutput": "structured",
+          "aiMode": true
+        }
+      },
+      "type": "@cryptodevops/n8n-nodes-youtube-transcript.youTubeTranscript",
+      "typeVersion": 1,
+      "position": [
+        -2384,
+        1256
+      ],
+      "id": "ef673da2-3478-4b59-bd01-7c0705ad8a0f",
+      "name": "Youtube Transcript"
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2080,
+        1776
+      ],
+      "id": "be632f11-5266-4747-bb9c-acf1e08eef1e",
+      "name": "Ollama Chat Model7",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyze this YouTube video transcript and organize it into a well-structured org-mode note with clear sections and subsections. Use the exact words from the transcript - do not paraphrase or summarize.\n\nTitle: {{ $('Youtube Title Extractor').item.json.output }}\nTranscript: {{ $('Youtube Transcript1').item.json.full_text }}\n\nInstructions:\n1. Identify natural topic breaks in the transcript\n2. Create descriptive headers for each major section using * (one asterisk)\n3. Create subsection headers using ** (two asterisks) where appropriate  \n4. Place the exact transcript text under the relevant headers\n5. Do not modify, summarize, or paraphrase the original words\n6. If the transcript flows continuously, break it into logical chunks\n\nFormat as org-mode with:\n- * for main sections (not #)\n- ** for subsections (not ##)\n- Regular text for transcript content (preserve exact wording)\n- Remove filler words like \"um\", \"uh\" only if excessive\n\nReturn only the organized transcript content in org-mode format, no extra commentary.",
+        "options": {
+          "systemMessage": "You are a transcript organizer. Your job is to take raw video transcripts and structure them into well-organized notes with clear sections while preserving the exact wording. Focus on identifying topic changes, key concepts, and natural breakpoints to create a readable structure."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -2096,
+        1552
+      ],
+      "id": "b00353f5-b8a8-42f5-a4d4-5d12c1cfdba4",
+      "name": "Transcript Organizer"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =============================================================================\n// EXECUTE COMMAND3 NODE - STANDARDIZED VERSION\n// =============================================================================\n// Replace the direct command with this Code node\n\n// Standardized escaping functions\nfunction escapeForElisp(str) {\n  if (typeof str !== 'string') return str;\n  return str\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/\"/g, '\\\\\"')\n    .replace(/\\n/g, '\\\\n')\n    .replace(/\\t/g, '\\\\t');\n}\n\nfunction buildSafeCommand(serverFile, elispExpression) {\n  const safeElisp = elispExpression\n    .replace(/\\\\/g, '\\\\\\\\')\n    .replace(/\"/g, '\\\\\"')\n    .replace(/`/g, '\\\\`')\n    .replace(/\\$/g, '\\\\$');\n  \n  return `emacsclient --server-file=${serverFile} -e \"${safeElisp}\"`;\n}\n\n// Get the inputs and escape them\nconst userMessage = $('Message Extractor').first().json.body.message;\n\nconst currentDate = new Date();\nconst dateStr = currentDate.toISOString().slice(0, 16).replace('T', ' ');\nconst title = $('Title Generator').first().json.output;\n\n// Build the elisp expression with proper escaping\nconst elispExpr = `(my/api-create-note \"${escapeForElisp(title)}\" \"${escapeForElisp(userMessage)}\")`;\n\n// Build the safe command\nconst command = buildSafeCommand(\"/root/emacs-server/server\", elispExpr);\n\nreturn [{\n  json: {\n    command: command,\n    title: title,\n    message: userMessage\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2672,
+        560
+      ],
+      "id": "4082b963-2b39-40df-8d42-be8487ee2ded",
+      "name": "Build Capture Shell Command"
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.command }}"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -2384,
+        560
+      ],
+      "id": "4f6d304b-9b6c-410a-b961-745fe3a455d8",
+      "name": "Execute Capture Command"
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -3752,
+        1480
+      ],
+      "id": "1cbac263-518e-44d9-85c7-21347829fa95",
+      "name": "Ollama Chat Model2",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=emacsclient --server-file=/root/emacs-server/server --eval \"(org-roam-db-sync 'force)\""
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -2384,
+        856
+      ],
+      "id": "296a9946-ef7c-4ff5-8d96-832342d01266",
+      "name": "Sync org-roam DB1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const message = $('Message Extractor').first().json.body.message;\n\n// Comprehensive YouTube URL regex patterns\nconst youtubePatterns = [\n  // Standard youtube.com URLs\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,\n  // Shortened youtu.be URLs  \n  /(?:https?:\\/\\/)?youtu\\.be\\/([a-zA-Z0-9_-]{11})/,\n  // YouTube URLs with additional parameters\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/watch\\?.*v=([a-zA-Z0-9_-]{11})/,\n  // YouTube mobile URLs\n  /(?:https?:\\/\\/)?m\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,\n  // YouTube embed URLs\n  /(?:https?:\\/\\/)?(?:www\\.)?youtube\\.com\\/embed\\/([a-zA-Z0-9_-]{11})/\n];\n\nlet extractedUrl = null;\nlet videoId = null;\n\n// Try each pattern to find a YouTube URL\nfor (const pattern of youtubePatterns) {\n  const match = message.match(pattern);\n  if (match) {\n    videoId = match[1];\n    extractedUrl = `https://www.youtube.com/watch?v=${videoId}`;\n    break;\n  }\n}\n\nif (!extractedUrl) {\n  // If no URL found, check if the entire message might be just a video ID\n  const videoIdPattern = /^[a-zA-Z0-9_-]{11}$/;\n  if (videoIdPattern.test(message.trim())) {\n    videoId = message.trim();\n    extractedUrl = `https://www.youtube.com/watch?v=${videoId}`;\n  }\n}\n\nreturn {\n  originalMessage: message,\n  extractedUrl: extractedUrl,\n  videoId: videoId,\n  hasUrl: !!extractedUrl\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2960,
+        1656
+      ],
+      "id": "cb3d2834-307f-43ac-b523-266f37f35e05",
+      "name": "Extract Youtube URL1"
+    },
+    {
+      "parameters": {
+        "videoUrl": "={{ $('Extract Youtube URL1').item.json.extractedUrl }}",
+        "language": "en",
+        "additionalOptions": {
+          "formatOutput": "structured",
+          "aiMode": true
+        }
+      },
+      "type": "@cryptodevops/n8n-nodes-youtube-transcript.youTubeTranscript",
+      "typeVersion": 1,
+      "position": [
+        -2672,
+        1656
+      ],
+      "id": "96efaee7-6817-488b-bf34-57866f90b725",
+      "name": "Youtube Transcript1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0f67bb9a-961f-4077-b894-f0bfbcad362e",
+              "name": "body.message",
+              "value": "={{ $json.body.message }}",
+              "type": "string"
+            },
+            {
+              "id": "6c04dbd0-3fc2-4d68-91a4-8c54fa439690",
+              "name": "body.sender",
+              "value": "={{ $json.body.sender }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -4048,
+        1256
+      ],
+      "id": "df7bdd75-1d17-476d-8584-5e9d8786a5e7",
+      "name": "Message Extractor"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.body.message }}",
+        "options": {
+          "systemMessage": "=You are an intent classifier for an AI knowledge management assistant. Analyze the user's message and respond with ONLY one of these intents:\n\n**YOUTUBE_SUMMARIZE** - Message contains YouTube URL and user wants analysis/summary\n**YOUTUBE_CAPTURE** - Message contains YouTube URL and user wants to save it as a note\n**CREATE** - User wants to create a formal reference note about a topic or concept\n**SEARCH** - User wants to search existing notes or ask questions about their knowledge\n**JOURNAL** - User is making a personal observation, daily entry, TODO, or sharing an experience\n\n**Key Distinctions:**\n\nCREATE should be for requests like:\n\n\"Create a note about American Pitbull Terriers\" (documenting external knowledge)\n\"Make a note about Docker networking concepts\" (reference material)\n\"Document everything about Kubernetes\" (formal documentation)\n\nJOURNAL should be for personal items like:\n\n\"Refactor org-roam-ai-assistant\" (personal task)\n\"Fix the authentication bug\" (personal TODO)\n\"Research vector embeddings\" (personal learning goal)\n\nThe key test should be: Is this documenting external knowledge for reference, or is this about my personal work/thoughts/tasks?\n\n**Detection Guidelines:**\n- YouTube URL + question words (what, how, explain, about) → YOUTUBE_SUMMARIZE\n- YouTube URL + save words (save, capture, note, remember, keep) → YOUTUBE_CAPTURE\n- **Explicit formal note creation** (\"create a note about...\", \"document information on...\", \"make a reference note for...\") → CREATE\n- **Questions or search requests** (\"find...\", \"search...\", \"what is...\", \"how do I...\") → SEARCH  \n- **Personal experiences/observations** (daily events, things you did, thoughts, TODOs, reflections) → JOURNAL\n\n**Examples:**\n\"https://youtu.be/abc123 what is this about?\" → YOUTUBE_SUMMARIZE\n\"save this video https://youtu.be/abc123\" → YOUTUBE_CAPTURE\n\"create a note about American Pitbull Terriers\" → CREATE\n\"document everything I know about Kubernetes networking\" → CREATE\n\"make a reference note for nginx SSL configuration\" → CREATE\n\"find my docker notes\" → SEARCH\n\"what's the difference between HTTP and HTTPS?\" → SEARCH\n\"how do I configure SSL in nginx?\" → SEARCH\n\"fixed the SSL issue today\" → JOURNAL\n\"Luna barked at something outside\" → JOURNAL\n\"had a productive meeting about the new architecture\" → JOURNAL\n\"need to update the firewall rules tomorrow\" → JOURNAL\n\"thinking about refactoring the authentication system\" → JOURNAL\n\"remember to backup the database\" → JOURNAL\n\n**If unsure between CREATE and JOURNAL:** \n- Does it sound like documenting external knowledge? → CREATE\n- Does it sound like a personal experience or thought? → JOURNAL\n\nRespond with only the intent word (YOUTUBE_SUMMARIZE, YOUTUBE_CAPTURE, CREATE, SEARCH, or JOURNAL)."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -3824,
+        1256
+      ],
+      "id": "5fc32878-1577-4a9f-a235-208a0f30a513",
+      "name": "Intent Classifier"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.toLowerCase() }}",
+                    "rightValue": "=create",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    },
+                    "id": "20bcd50a-d072-45cf-84f2-f492d2e72442"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "note-create"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5df0022a-b473-42aa-987f-feefec691225",
+                    "leftValue": "={{ $json.output.toLowerCase() }}",
+                    "rightValue": "search",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "note_search"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "61ee076d-ab3b-44a1-8477-d5f100444a9d",
+                    "leftValue": "={{ $json.output.toLowerCase() }}",
+                    "rightValue": "youtube_summarize",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "youtube-summarize"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9ebc758b-62be-4823-9dad-d100ee979e42",
+                    "leftValue": "={{ $json.output.toLowerCase() }}",
+                    "rightValue": "youtube_capture",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "youtube-capture"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "d0f227cb-a94d-46ad-94fd-edc67e67ef56",
+                    "leftValue": "={{ $json.output.toLowerCase() }}",
+                    "rightValue": "journal",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "journal-entry"
+            }
+          ]
+        },
+        "options": {
+          "allMatchingOutputs": true
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -3472,
+        1208
+      ],
+      "id": "13cfdd6b-fbb5-43d2-a13c-41915aff2686",
+      "name": "Intent Switch",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2952,
+        784
+      ],
+      "id": "4149928d-8244-42f0-9495-99bca709d94d",
+      "name": "Ollama Chat Model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate a concise, descriptive title for this note content. Keep it under 60 characters and make it suitable for a filename.\n\nContent: {{ $('Message Extractor').item.json.body.message }}\n\nReturn only the title, nothing else.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -3024,
+        560
+      ],
+      "id": "e3845dc5-0be1-47c2-a832-379fdc773acf",
+      "name": "Title Generator"
+    },
+    {
+      "parameters": {
+        "model": "gpt-oss:20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        -2088,
+        976
+      ],
+      "id": "4ad5c28e-4acf-43a7-bc48-3704a50486c0",
+      "name": "Ollama Chat Model5",
+      "credentials": {
+        "ollamaApi": {
+          "id": "pzHVzANzBE2rjJqU",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://n8n-backend.cruver.network:8000/",
+        "serverTransport": "httpStreamable",
+        "include": "selected",
+        "includeTools": [
+          "search_notes",
+          "contextual_search"
+        ]
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.1,
+      "position": [
+        -1960,
+        976
+      ],
+      "id": "28f5ee7d-0215-4f45-be8e-466ac728282a",
+      "name": "MCP Client"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Message Extractor').item.json.body.message }}",
+        "options": {
+          "systemMessage": "  You are a knowledge base search assistant that helps users find and explore information from an org-roam knowledge management system. Your responses will be displayed\n  in Element (Matrix client), so format them clearly and concisely.\n\n  ## Response Formatting Guidelines:\n\n  **For Search Results:**\n  - Start with a brief summary of what was found\n  - Use bullet points (•) for listing multiple results\n  - Include note titles in **bold**\n  - Show creation dates when available\n  - Highlight key concepts or tags with `backticks`\n  - Keep each result description to 1-2 sentences\n\n  **For Contextual/Enhanced Searches:**\n  - Provide a numbered list for detailed results\n  - Include relevance context (why each result matches)\n  - Quote key snippets using > blockquotes\n  - Show connections between notes when found\n\n  **General Formatting:**\n  - Use short paragraphs (2-3 sentences max)\n  - Include line breaks between sections\n  - End with suggested follow-up searches if relevant\n  - If no results found, suggest alternative search terms\n\n  **Example Response Structure:**\n  Found **3 relevant notes** about your search:\n\n  • **Note Title** (2024-01-15)\n    Brief description of content and relevance\n\n  • **Another Note** (2024-01-12)\n    Key insights from this note\n\n  **Key themes identified:** `theme1`, `theme2`, `theme3`\n\n  Would you like me to search for related topics like \"alternative terms\" or \"related concepts\"?\n\n  ## Available Tools:\n  - search_notes: Basic title/content search\n  - contextual_search: Enhanced search with full context\n  - create_note: Create new notes\n  - add_daily_entry: Add structured daily entries\n\n  Always prioritize clarity and actionability in your responses.\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        -2096,
+        752
+      ],
+      "id": "d5928f3f-220b-4712-8a42-5037471435dd",
+      "name": "Search Agent"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://n8n-backend.cruver.network:8000/",
+        "serverTransport": "httpStreamable",
+        "include": "selected",
+        "includeTools": [
+          "add_daily_entry",
+          "get_daily_content",
+          "create_note"
+        ]
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.1,
+      "position": [
+        -2312,
+        2280
+      ],
+      "id": "6b414736-4e61-433a-99bf-5b02beefa540",
+      "name": "MCP Client1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: your JSON in items[0].json\n// Output: { observation: \"<value>\" }\nconst obsStr = $input.first().json.intermediateSteps[0].observation;\nconst obs = JSON.parse(obsStr);\n\nreturn {\n  json: {\n    response: obs[0].text\n  }\n};\n\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2032,
+        2056
+      ],
+      "id": "9481c747-c00d-44dc-a741-5f84b309a7d1",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://n8n-backend.cruver.network:8000/",
+        "serverTransport": "httpStreamable",
+        "include": "selected",
+        "includeTools": [
+          "create_note"
+        ]
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.1,
+      "position": [
+        -1952,
+        1776
+      ],
+      "id": "497a16bd-7287-4859-97fa-cf50cce304e9",
+      "name": "MCP Client2"
+    }
+  ],
+  "pinData": {
+    "When clicking ‘Execute workflow’": [
+      {
+        "json": {
+          "headers": {
+            "host": "n8n-backend.cruver.network:5678",
+            "user-agent": "python-requests/2.32.4",
+            "accept-encoding": "gzip, deflate",
+            "accept": "*/*",
+            "connection": "keep-alive",
+            "content-length": "150",
+            "content-type": "application/json"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "room_id": "!CconSiqPkkUBEtamnE:matrix.cruver.network",
+            "sender": "@dcruver:matrix.cruver.network",
+            "message": "Journal Entry: Evaluate Goose with Qwen3-coder in place of Opencode or Claude Code"
+          },
+          "webhookUrl": "http://localhost:5678/webhook/d58e25ad-79f7-4d89-aad3-b9af05f6444f",
+          "executionMode": "production"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Message Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Computra Webhook": {
+      "main": [
+        [
+          {
+            "node": "Message Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync org-roam DB": {
+      "main": [
+        [
+          {
+            "node": "Title Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Response Formatter": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Youtube Video Summarizer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Input": {
+      "main": [
+        [
+          {
+            "node": "Journal Entry Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model4": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Journal Entry Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Youtube Video Summarizer": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Journal Entry Generator": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model6": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Youtube Title Extractor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Youtube Title Extractor": {
+      "main": [
+        [
+          {
+            "node": "Transcript Organizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Youtube URL": {
+      "main": [
+        [
+          {
+            "node": "Youtube Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Youtube Transcript": {
+      "main": [
+        [
+          {
+            "node": "Youtube Video Summarizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model7": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Transcript Organizer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcript Organizer": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Capture Shell Command": {
+      "main": [
+        [
+          {
+            "node": "Execute Capture Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Capture Command": {
+      "main": [
+        [
+          {
+            "node": "Create Response Formatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Intent Classifier",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync org-roam DB1": {
+      "main": [
+        [
+          {
+            "node": "Search Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Youtube URL1": {
+      "main": [
+        [
+          {
+            "node": "Youtube Transcript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Youtube Transcript1": {
+      "main": [
+        [
+          {
+            "node": "Youtube Title Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message Extractor": {
+      "main": [
+        [
+          {
+            "node": "Intent Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Classifier": {
+      "main": [
+        [
+          {
+            "node": "Intent Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Switch": {
+      "main": [
+        [
+          {
+            "node": "Sync org-roam DB",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sync org-roam DB1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Youtube URL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Youtube URL1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Title Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Title Generator": {
+      "main": [
+        [
+          {
+            "node": "Build Capture Shell Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Search Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client": {
+      "ai_tool": [
+        [
+          {
+            "node": "Search Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Journal Entry Generator",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client2": {
+      "ai_tool": [
+        [
+          {
+            "node": "Transcript Organizer",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "bb7efdec-f640-4b37-ae2e-a129b20dd6c6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "63198ec079e2cdcc337b2a35b41ae9732ddaee86d6d5af2ee39cc5a64f13d5cc"
+  },
+  "id": "OP4zn087woAMTdoU",
+  "tags": []
+}
