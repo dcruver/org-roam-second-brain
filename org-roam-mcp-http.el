@@ -425,6 +425,17 @@
    '((file_path . ((type . "string") (description . "Absolute path to the org file")))))
 
   (org-roam-mcp-http--register-tool
+   "generate_embeddings"
+   "Generate embeddings for all notes (batch operation). WARNING: slow, processes all 1500+ notes."
+   (lambda (_args)
+     (condition-case err
+         (progn
+           (org-roam-semantic-generate-embeddings)
+           (json-encode '((success . t) (message . "Batch embedding generation started"))))
+       (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
+   '() '() '())
+
+  (org-roam-mcp-http--register-tool
    "sync_database"
    "Sync the org-roam database."
    (lambda (_args)
@@ -568,14 +579,21 @@ Accumulates data across multiple filter calls to handle chunked delivery."
                 (org-roam-mcp-http--make-http-response "200 OK" "text/plain" "OK"))
               (delete-process proc))
              ((string-prefix-p "POST" method-line)
-              (let ((response (condition-case err
-                                  (org-roam-mcp-http--dispatch body)
-                                (error (json-encode
-                                        `((jsonrpc . "2.0") (id . :null)
-                                          (error . ((message . ,(error-message-string err))))))))))
-                (process-send-string proc
-                  (org-roam-mcp-http--make-http-response "200 OK" "application/json" response))
-                (delete-process proc)))
+              ;; Defer tool execution via timer so the event loop stays free
+              ;; for any synchronous HTTP calls (e.g., embedding generation)
+              (let ((saved-proc proc)
+                    (saved-body body))
+                (run-at-time 0 nil
+                  (lambda ()
+                    (let ((response (condition-case err
+                                        (org-roam-mcp-http--dispatch saved-body)
+                                      (error (json-encode
+                                              `((jsonrpc . "2.0") (id . :null)
+                                                (error . ((message . ,(error-message-string err))))))))))
+                      (when (process-live-p saved-proc)
+                        (process-send-string saved-proc
+                          (org-roam-mcp-http--make-http-response "200 OK" "application/json" response))
+                        (delete-process saved-proc)))))))
              (t
               (process-send-string proc
                 (org-roam-mcp-http--make-http-response "405 Method Not Allowed" "text/plain" ""))
