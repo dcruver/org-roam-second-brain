@@ -15,12 +15,27 @@
 
 (require 'json)
 (require 'cl-lib)
+(require 'org-id)
 
 (defvar org-roam-mcp-http--port 8007
   "Port for the org-roam MCP HTTP server.")
 
 (defvar org-roam-mcp-http--server-proc nil
   "The httpd server process.")
+
+(defvar org-roam-mcp-http--session-id nil
+  "Current MCP session ID, or nil if no session is active.")
+
+(defvar org-roam-mcp-http--protocol-version "2025-03-26"
+  "MCP protocol version this server implements.")
+
+(defvar org-roam-mcp-http--server-info
+  '((name . "org-roam-mcp") (version . "1.0.0"))
+  "Server info returned in MCP initialize response.")
+
+(defun org-roam-mcp-http--generate-session-id ()
+  "Generate a new MCP session ID."
+  (org-id-uuid))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool registry: maps tool name -> (:fn FUNC :args-spec ((NAME . TYPE) ...))
@@ -504,30 +519,58 @@
      org-roam-mcp-http--tools)
     (json-encode `((result . ((tools . ,(vconcat (nreverse tools-list)))))))))
 
+;; ---------------------------------------------------------------------------
+;; MCP protocol handlers
+;; ---------------------------------------------------------------------------
+
+(defun org-roam-mcp-http--handle-initialize (params)
+  "Handle MCP initialize request. Create session and return capabilities."
+  (setq org-roam-mcp-http--session-id (org-roam-mcp-http--generate-session-id))
+  (message "org-roam-mcp-http: new session %s (client: %s)"
+           org-roam-mcp-http--session-id
+           (alist-get 'name (alist-get 'clientInfo params)))
+  (json-encode
+   `((result . ((protocolVersion . ,org-roam-mcp-http--protocol-version)
+                (capabilities . ((tools . ((listChanged . :json-false)))))
+                (serverInfo . ,org-roam-mcp-http--server-info))))))
+
+(defun org-roam-mcp-http--handle-ping (_params)
+  "Handle MCP ping request."
+  (json-encode '((result . ()))))
+
 (defun org-roam-mcp-http--dispatch (body)
-  "Dispatch a JSON-RPC request from BODY string. Return JSON response string."
+  "Dispatch a JSON-RPC request from BODY string.
+Return JSON response string, or symbol `notification' for fire-and-forget messages."
   (condition-case err
       (let* ((request (json-read-from-string body))
              (id (alist-get 'id request))
              (method (alist-get 'method request))
-             (params (or (alist-get 'params request) '()))
-             (response
-              (cond
-               ((equal method "tools/call")
-                (org-roam-mcp-http--handle-tools-call params))
-               ((equal method "tools/list")
-                (org-roam-mcp-http--handle-tools-list params))
-               (t
-                (json-encode `((error . ((code . -32601)
-                                         (message . ,(format "Unknown method: %s" method))))))))))
-        ;; Wrap with jsonrpc and id
-        (let* ((parsed-response (json-read-from-string response))
-               (final `((jsonrpc . "2.0")
-                        (id . ,id)
-                        ,@(if (alist-get 'error parsed-response)
-                              `((error . ,(alist-get 'error parsed-response)))
-                            `((result . ,(alist-get 'result parsed-response)))))))
-          (json-encode final)))
+             (params (or (alist-get 'params request) '())))
+        ;; Notifications (no id) get no JSON-RPC response
+        (if (and (null id) (string-prefix-p "notifications/" method))
+            'notification
+          (let* ((response
+                  (cond
+                   ((equal method "initialize")
+                    (org-roam-mcp-http--handle-initialize params))
+                   ((equal method "ping")
+                    (org-roam-mcp-http--handle-ping params))
+                   ((equal method "tools/call")
+                    (org-roam-mcp-http--handle-tools-call params))
+                   ((equal method "tools/list")
+                    (org-roam-mcp-http--handle-tools-list params))
+                   (t
+                    (json-encode `((error . ((code . -32601)
+                                             (message . ,(format "Unknown method: %s" method)))))))))
+                 (parsed-response (json-read-from-string response))
+                 (result-val (alist-get 'result parsed-response))
+                 (final `((jsonrpc . "2.0")
+                          (id . ,id)
+                          ,@(if (alist-get 'error parsed-response)
+                                `((error . ,(alist-get 'error parsed-response)))
+                              ;; Preserve empty objects: nil from json-read means {}
+                              `((result . ,(or result-val (make-hash-table))))))))
+            (json-encode final))))
     (error
      (json-encode `((jsonrpc . "2.0")
                     (id . :null)
@@ -543,8 +586,11 @@
 
 (defun org-roam-mcp-http--make-http-response (status content-type body)
   "Create an HTTP response string with STATUS, CONTENT-TYPE, and BODY."
-  (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n%s"
-          status content-type (string-bytes body) body))
+  (let ((session-header (if org-roam-mcp-http--session-id
+                            (format "Mcp-Session-Id: %s\r\n" org-roam-mcp-http--session-id)
+                          "")))
+    (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Mcp-Session-Id\r\n%sConnection: close\r\n\r\n%s"
+            status content-type (string-bytes body) session-header body)))
 
 (defun org-roam-mcp-http--handle-connection (proc data)
   "Handle incoming HTTP connection on PROC with DATA.
@@ -577,25 +623,49 @@ Accumulates data across multiple filter calls to handle chunked delivery."
                 (org-roam-mcp-http--make-http-response "204 No Content" "text/plain" ""))
               (delete-process proc))
              ((string-prefix-p "GET" method-line)
+              ;; MCP Streamable HTTP: GET is for SSE streams (not supported)
               (process-send-string proc
-                (org-roam-mcp-http--make-http-response "200 OK" "text/plain" "OK"))
+                (org-roam-mcp-http--make-http-response "405 Method Not Allowed" "text/plain" ""))
+              (delete-process proc))
+             ((string-prefix-p "DELETE" method-line)
+              ;; MCP session termination
+              (setq org-roam-mcp-http--session-id nil)
+              (message "org-roam-mcp-http: session terminated by client")
+              (process-send-string proc
+                (org-roam-mcp-http--make-http-response "200 OK" "text/plain" ""))
               (delete-process proc))
              ((string-prefix-p "POST" method-line)
               ;; Defer tool execution via timer so the event loop stays free
-              ;; for any synchronous HTTP calls (e.g., embedding generation)
               (let ((saved-proc proc)
-                    (saved-body body))
+                    (saved-body body)
+                    (saved-headers headers))
                 (run-at-time 0 nil
                   (lambda ()
-                    (let ((response (condition-case err
-                                        (org-roam-mcp-http--dispatch saved-body)
-                                      (error (json-encode
-                                              `((jsonrpc . "2.0") (id . :null)
-                                                (error . ((message . ,(error-message-string err))))))))))
-                      (when (process-live-p saved-proc)
-                        (process-send-string saved-proc
-                          (org-roam-mcp-http--make-http-response "200 OK" "application/json" response))
-                        (delete-process saved-proc)))))))
+                    ;; Session validation: reject mismatched session IDs
+                    (let* ((client-session
+                            (when (string-match "[Mm]cp-[Ss]ession-[Ii]d: *\\([^\r\n]+\\)" saved-headers)
+                              (string-trim (match-string 1 saved-headers))))
+                           (session-valid
+                            (or (null org-roam-mcp-http--session-id)  ; no session yet
+                                (null client-session)                  ; client didn't send one
+                                (equal client-session org-roam-mcp-http--session-id))))
+                      (if (not session-valid)
+                          (when (process-live-p saved-proc)
+                            (process-send-string saved-proc
+                              (org-roam-mcp-http--make-http-response "404 Not Found" "text/plain" ""))
+                            (delete-process saved-proc))
+                        (let ((result (condition-case err
+                                          (org-roam-mcp-http--dispatch saved-body)
+                                        (error (json-encode
+                                                `((jsonrpc . "2.0") (id . :null)
+                                                  (error . ((message . ,(error-message-string err))))))))))
+                          (when (process-live-p saved-proc)
+                            (if (eq result 'notification)
+                                (process-send-string saved-proc
+                                  (org-roam-mcp-http--make-http-response "202 Accepted" "text/plain" ""))
+                              (process-send-string saved-proc
+                                (org-roam-mcp-http--make-http-response "200 OK" "application/json" result)))
+                            (delete-process saved-proc)))))))))
              (t
               (process-send-string proc
                 (org-roam-mcp-http--make-http-response "405 Method Not Allowed" "text/plain" ""))
@@ -637,6 +707,7 @@ Accumulates data across multiple filter calls to handle chunked delivery."
   (when org-roam-mcp-http--server
     (delete-process org-roam-mcp-http--server)
     (setq org-roam-mcp-http--server nil)
+    (setq org-roam-mcp-http--session-id nil)
     (message "org-roam-mcp-http: stopped")))
 
 (provide 'org-roam-mcp-http)
