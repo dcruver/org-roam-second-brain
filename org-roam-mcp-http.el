@@ -513,7 +513,11 @@
          (push `((name . ,name)
                  (description . ,(org-roam-mcp-tool-description tool))
                  (inputSchema . ((type . "object")
-                                 (properties . ,(nreverse properties))
+                                 ;; Empty alist json-encodes as null; use a hash-table
+                                 ;; so zero-arg tools emit "properties": {} (MCP spec).
+                                 (properties . ,(if properties
+                                                    (nreverse properties)
+                                                  (make-hash-table)))
                                  (required . ,(vconcat (org-roam-mcp-tool-required-args tool))))))
                tools-list)))
      org-roam-mcp-http--tools)
