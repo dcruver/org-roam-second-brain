@@ -553,28 +553,27 @@ Return JSON response string, or symbol `notification' for fire-and-forget messag
         ;; Notifications (no id) get no JSON-RPC response
         (if (and (null id) (string-prefix-p "notifications/" method))
             'notification
-          (let* ((response
-                  (cond
-                   ((equal method "initialize")
-                    (org-roam-mcp-http--handle-initialize params))
-                   ((equal method "ping")
-                    (org-roam-mcp-http--handle-ping params))
-                   ((equal method "tools/call")
-                    (org-roam-mcp-http--handle-tools-call params))
-                   ((equal method "tools/list")
-                    (org-roam-mcp-http--handle-tools-list params))
-                   (t
-                    (json-encode `((error . ((code . -32601)
-                                             (message . ,(format "Unknown method: %s" method)))))))))
-                 (parsed-response (json-read-from-string response))
-                 (result-val (alist-get 'result parsed-response))
-                 (final `((jsonrpc . "2.0")
-                          (id . ,id)
-                          ,@(if (alist-get 'error parsed-response)
-                                `((error . ,(alist-get 'error parsed-response)))
-                              ;; Preserve empty objects: nil from json-read means {}
-                              `((result . ,(or result-val (make-hash-table))))))))
-            (json-encode final))))
+          (let ((response
+                 (cond
+                  ((equal method "initialize")
+                   (org-roam-mcp-http--handle-initialize params))
+                  ((equal method "ping")
+                   (org-roam-mcp-http--handle-ping params))
+                  ((equal method "tools/call")
+                   (org-roam-mcp-http--handle-tools-call params))
+                  ((equal method "tools/list")
+                   (org-roam-mcp-http--handle-tools-list params))
+                  (t
+                   (json-encode `((error . ((code . -32601)
+                                            (message . ,(format "Unknown method: %s" method))))))))))
+            ;; Inject jsonrpc + id after the handler's opening brace via
+            ;; string concatenation. Round-tripping through json-read-from-string
+            ;; collapses every nested empty object ({}) into nil/null, which
+            ;; strict MCP clients reject (e.g. zero-arg tools' inputSchema.properties).
+            (concat "{\"jsonrpc\":\"2.0\",\"id\":"
+                    (json-encode id)
+                    ","
+                    (substring response 1)))))
     (error
      (json-encode `((jsonrpc . "2.0")
                     (id . :null)
