@@ -399,6 +399,11 @@ Does NOT call `save-buffer` (so it is safe in save hooks)."
                     (error "Position %d is not at a heading" identifier)))
                  (t
                   (error "Invalid identifier type: %s" identifier)))
+                ;; Ensure the heading has ONE property drawer before writing —
+                ;; mirrors the file-level branch below. Without this, a missing
+                ;; or malformed drawer makes org-entry-put prepend a fresh
+                ;; duplicate drawer on every save.
+                (unless (org-get-property-block) (org-insert-property-drawer))
                 ;; Ensure heading has an ID
                 (unless (org-entry-get (point) "ID")
                   (org-entry-put (point) "ID" (org-roam-semantic--generate-chunk-id)))
@@ -430,6 +435,9 @@ This allows short sections to get IDs for future expansion."
         (goto-char (point-min))
         (when (re-search-forward (format "^\\*+\\s-+%s\\s-*$" (regexp-quote heading-text)) nil t)
           (beginning-of-line)
+          ;; Ensure ONE property drawer exists, so a missing/malformed drawer
+          ;; doesn't make org-entry-put prepend a duplicate.
+          (unless (org-get-property-block) (org-insert-property-drawer))
           ;; Only add ID if one doesn't exist
           (unless (org-entry-get (point) "ID")
             (org-entry-put (point) "ID" (org-roam-semantic--generate-chunk-id))

@@ -80,8 +80,11 @@
 These are large float arrays that cause JSON parsing issues when
 output through emacsclient."
   (when content
+    ;; Consume the trailing newline too — leaving a blank line inside a
+    ;; :PROPERTIES: drawer malforms it, which defeats org's drawer detection
+    ;; and makes the embedding hook prepend duplicate drawers on later saves.
     (replace-regexp-in-string
-     "^:EMBEDDING[^:]*:.*$" "" content)))
+     "^:EMBEDDING[^:]*:.*\n?" "" content)))
 
 (defun my/api--save-buffer-no-hooks ()
   "Save buffer without triggering before-save and after-save hooks.
@@ -1392,14 +1395,35 @@ If SECTION is provided, return only that heading's content."
      (json-encode `((success . :json-false)
                    (error . ,(format "Error reading note: %s" (error-message-string err))))))))
 
-(defun my/api-update-note (identifier content &optional section mode)
+(defun my/api--top-level-headings (text)
+  "Return the list of top-level (single-star) Org heading titles in TEXT."
+  (let ((headings '())
+        (pos 0))
+    (while (string-match "^\\* +\\(.*?\\)[ \t]*$" text pos)
+      (push (match-string 1 text) headings)
+      (setq pos (match-end 0)))
+    (nreverse headings)))
+
+(defun my/api--backup-file (file)
+  "Write a timestamped sibling backup of FILE before a destructive edit."
+  (when (and file (file-exists-p file))
+    (copy-file file (format "%s.bak-%s" file (format-time-string "%s")) t)))
+
+(defun my/api-update-note (identifier content &optional section mode force)
   "Update content in a note by ID or path.
 IDENTIFIER can be an org-roam ID or a path relative to org-roam-directory.
 CONTENT is the text to add.
 SECTION is an optional heading name to target.
-MODE is \"append\" (default), \"prepend\", or \"replace\"."
+MODE is \"append\" (default), \"prepend\", or \"replace\".
+FORCE, when non-nil, overrides the destructive-replace guard.
+
+A whole-file \"replace\" (no SECTION) is guarded: it is refused when CONTENT
+would drop existing top-level headings or shrink the note past half its size,
+unless FORCE is set.  A timestamped .bak sibling is written before any
+destructive whole-file replace."
   (my/api--ensure-org-roam-db)
-  (let ((mode (or mode "append")))
+  (let ((mode (or mode "append"))
+        (force-p (or (eq force t) (equal force "true"))))
     (condition-case err
         (let* ((file (cond
                       ;; Check if it's a file path
@@ -1453,11 +1477,28 @@ MODE is \"append\" (default), \"prepend\", or \"replace\"."
                 ;; No section - operate on whole file
                 (cond
                  ((string= mode "replace")
-                  ;; Replace everything after properties/title
+                  ;; Replace everything after properties/title.
+                  ;; GUARD: whole-file replace is destructive.  Refuse (unless
+                  ;; FORCE) when CONTENT would drop existing top-level headings
+                  ;; or drastically shrink the note, so a truncated payload
+                  ;; cannot silently wipe the file.  Back up before replacing.
                   (goto-char (point-min))
                   (when (re-search-forward "^#\\+title:.*\n+" nil t)
-                    (delete-region (point) (point-max))
-                    (insert content "\n")))
+                    (let* ((body-start (point))
+                           (old-body (buffer-substring-no-properties body-start (point-max)))
+                           (dropped (seq-difference (my/api--top-level-headings old-body)
+                                                    (my/api--top-level-headings content)
+                                                    #'string=))
+                           (shrunk (and (> (length old-body) 200)
+                                        (< (length content) (* 0.5 (length old-body))))))
+                      (when (and (not force-p) (or dropped shrunk))
+                        (error "refused: whole-file replace would %s; re-read the note and resend the full body, or pass force:true to override"
+                               (if dropped
+                                   (format "drop top-level heading(s): %s" (mapconcat #'identity dropped ", "))
+                                 (format "shrink the note from %d to %d chars" (length old-body) (length content)))))
+                      (my/api--backup-file file)
+                      (delete-region body-start (point-max))
+                      (insert content "\n"))))
                  ((string= mode "prepend")
                   ;; Insert after properties/title
                   (goto-char (point-min))

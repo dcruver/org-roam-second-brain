@@ -120,21 +120,23 @@
 
   (org-roam-mcp-http--register-tool
    "update_note"
-   "Update content in a note by appending, prepending, or replacing. Can target specific sections."
+   "Update content in a note by appending, prepending, or replacing. Can target specific sections. A whole-file replace is guarded: it is refused if it would drop existing top-level headings or drastically shrink the note (pass force:true to override), so prefer append/prepend or section-targeted edits."
    (lambda (args)
      (let ((identifier (alist-get 'identifier args))
            (content (alist-get 'content args))
            (section (alist-get 'section args))
-           (mode (or (alist-get 'mode args) "append")))
+           (mode (or (alist-get 'mode args) "append"))
+           (force (alist-get 'force args)))
        (if section
-           (my/api-update-note identifier content section mode)
-         (my/api-update-note identifier content nil mode))))
-   '((identifier . string) (content . string) (section . string) (mode . string))
+           (my/api-update-note identifier content section mode force)
+         (my/api-update-note identifier content nil mode force))))
+   '((identifier . string) (content . string) (section . string) (mode . string) (force . boolean))
    '("identifier" "content")
    '((identifier . ((type . "string") (description . "Org-roam node ID or path")))
      (content . ((type . "string") (description . "Content to add to the note")))
      (section . ((type . "string") (description . "Optional heading to target (creates if not found)")))
-     (mode . ((type . "string") (description . "append, prepend, or replace") (default . "append")))))
+     (mode . ((type . "string") (description . "append, prepend, or replace") (default . "append")))
+     (force . ((type . "boolean") (description . "Override the destructive whole-file replace guard. Leave unset; only use for a deliberate full rewrite.") (default . :json-false)))))
 
   (org-roam-mcp-http--register-tool
    "create_note"
