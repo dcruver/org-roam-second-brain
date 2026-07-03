@@ -1869,7 +1869,7 @@ For heading-level nodes: properties are :PROPERTIES: drawer entries."
                   (json-encode
                    `((success . :json-false)
                      (error . ,(format "Node %s not found in file %s"
-                                      node-id file)))))))))
+                                      node-id file))))))))))
     (error
      (json-encode `((success . :json-false)
                    (error . ,(format "Error reading node: %s"
