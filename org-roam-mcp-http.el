@@ -105,6 +105,20 @@
 
   ;; --- Note operations (file-level) ---
   (org-roam-mcp-http--register-tool
+   "read_note"
+   "Read full content of a note by org-roam ID or path."
+   (lambda (args)
+     (let ((identifier (alist-get 'identifier args))
+           (section (alist-get 'section args)))
+       (if section
+           (my/api-read-note identifier section)
+         (my/api-read-note identifier))))
+   '((identifier . string) (section . string))
+   '("identifier")
+   '((identifier . ((type . "string") (description . "Org-roam node ID or path")))
+     (section . ((type . "string") (description . "Optional heading name to return only that section")))))
+
+  (org-roam-mcp-http--register-tool
    "create_note"
    "Create a new org-roam note file. Returns note_id for use with add_node."
    (lambda (args)
