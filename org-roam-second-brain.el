@@ -1752,7 +1752,9 @@ If FILE is nil, uses current buffer's file."
           (insert "\n** Related Notes\n")
           ;; Concepts first
           (when-let ((concepts (plist-get data :concepts)))
-            (insert "*** Concept Notes\n")
+            (insert (format "*** %s\n"
+                            (file-name-sans-extension
+                             (file-name-nondirectory file))))
             (dolist (c concepts)
               (insert (format "- [[id:%s][%s]] (%.3f)\n"
                               (plist-get c :id)

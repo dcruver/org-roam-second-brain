@@ -120,37 +120,29 @@ This is a helper function to ensure embeddings are persisted to disk."
 ;;; BASIC NOTE CREATION AND SEARCH
 ;;; ============================================================================
 
-(defun my/api-create-note (title content &optional type confidence)
-  "Create new org-roam note with properties and generate embeddings if org-roam-semantic is available."
-  (interactive)
+(defun my/api-create-note (title &optional properties)
+  "Create a new org-roam note with TITLE.
+PROPERTIES is an alist of #+KEYWORD: value pairs added to the file header."
   (my/api--ensure-org-roam-db)
-
   (let* ((id (my/api--generate-id))
          (file-path (my/api--create-org-file title id)))
-
-    ;; Create file using buffer approach to trigger hooks
     (with-current-buffer (find-file-noselect file-path)
       (org-mode)
       (erase-buffer)
-      (insert (format ":PROPERTIES:\n")
-              (format ":ID: %s\n" id)
-              (format ":END:\n")
-              (format "#+title: %s\n\n" title)
-              (format "%s\n" (or content "")))
-      (save-buffer)  ; This will trigger the before-save-hook
+      (insert ":PROPERTIES:\n")
+      (insert (format ":ID: %s\n" id))
+      (insert ":END:\n")
+      (insert (format "#+title: %s\n" title))
+      (dolist (prop (or properties '()))
+        (insert (format "#+%s: %s\n" (car prop) (cdr prop))))
+      (save-buffer)
       (kill-buffer (current-buffer)))
-
     (org-roam-db-sync)
-
-    ;; Generate embeddings if org-roam-semantic is available
-    (my/api--generate-and-save-embedding file-path)
-
-    (let ((node (org-roam-node-from-id id)))
-      (json-encode
-        `((success . t)
-          (message . "Note created successfully")
-          (embedding_generated . ,(and (fboundp 'org-roam-semantic-generate-embedding) t))
-          (note . ,(my/api--node-to-json node)))))))
+    (json-encode
+     `((success . t)
+       (note_id . ,id)
+       (file . ,file-path)
+       (title . ,title)))))
 
 (defun my/api-search-notes (query)
   "Search org-roam notes by QUERY."
@@ -1757,6 +1749,280 @@ TAG is the tag to add or remove (without colons)."
     (error
      (json-encode (list (cons (quote success) :json-false)
                        (cons (quote error) (format "Error: %s" (error-message-string err))))))))
+
+;;; ============================================================================
+;;; NODE-BASED OPERATIONS
+;;; ============================================================================
+
+(defun my/api--extract-file-keywords (content)
+  "Extract #+KEYWORD: value pairs from CONTENT string."
+  (let ((keywords '()))
+    (with-temp-buffer
+      (insert content)
+      (goto-char (point-min))
+      (while (re-search-forward "^#\\+\\([^:]+\\):\\s-*\\(.*\\)$" nil t)
+        (push (cons (match-string 1) (string-trim (match-string 2))) keywords)))
+    (nreverse keywords)))
+
+(defun my/api--node-body-at-point ()
+  "Return body text of the org heading at point, with embeddings stripped.
+Body is the content after the heading line and :PROPERTIES: drawer."
+  (save-excursion
+    (org-back-to-heading t)
+    (end-of-line)
+    (forward-line 1)
+    (when (looking-at "^[ \t]*:PROPERTIES:")
+      (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+        (forward-line 1)))
+    (let ((start (point))
+          (end (save-excursion (org-end-of-subtree t t) (point))))
+      (if (>= start end)
+          ""
+        (my/api--strip-embedding-properties
+         (buffer-substring-no-properties start end))))))
+
+(defun my/api--node-drawer-props-at-point ()
+  "Return alist of :PROPERTIES: drawer entries for heading at point.
+Excludes :ID: and :EMBEDDING*: entries."
+  (save-excursion
+    (org-back-to-heading t)
+    (end-of-line)
+    (forward-line 1)
+    (let ((props '()))
+      (when (looking-at "^[ \t]*:PROPERTIES:")
+        (forward-line 1)
+        (while (and (not (looking-at "^[ \t]*:END:")) (not (eobp)))
+          (when (looking-at "^[ \t]*:\\([^:]+\\):\\s-*\\(.*\\)$")
+            (let ((key (match-string 1)) (val (string-trim (match-string 2))))
+              (unless (or (string= key "ID") (string-prefix-p "EMBEDDING" key))
+                (push (cons key val) props))))
+          (forward-line 1)))
+      (nreverse props))))
+
+(defun my/api--node-body-bounds-at-point ()
+  "Return (START . END) of the body text for the org heading at point."
+  (save-excursion
+    (org-back-to-heading t)
+    (end-of-line)
+    (forward-line 1)
+    (when (looking-at "^[ \t]*:PROPERTIES:")
+      (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+        (forward-line 1)))
+    (cons (point)
+          (save-excursion (org-end-of-subtree t t) (point)))))
+
+(defun my/api-read-node (node-id)
+  "Read a node by its org-roam ID.
+Returns text (body content), properties, title, level, and file.
+For file-level nodes (level 0): properties are #+KEYWORD: pairs.
+For heading-level nodes: properties are :PROPERTIES: drawer entries."
+  (condition-case err
+      (let* ((node (org-roam-node-from-id node-id))
+             (file (when node (org-roam-node-file node)))
+             (level (when node (org-roam-node-level node))))
+        (if (not node)
+            (json-encode `((success . :json-false)
+                          (error . ,(format "Node not found: %s" node-id))))
+          (let ((raw (with-temp-buffer
+                       (insert-file-contents file)
+                       (buffer-string))))
+            (if (= level 0)
+                (let* ((stripped (my/api--strip-embedding-properties raw))
+                       (keywords (my/api--extract-file-keywords stripped))
+                       (body (with-temp-buffer
+                               (insert stripped)
+                               (goto-char (point-min))
+                               (when (looking-at "^[ \t]*:PROPERTIES:")
+                                 (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+                                 (forward-line 1))
+                               (while (looking-at "^#\\+") (forward-line 1))
+                               (while (and (not (eobp)) (looking-at "^[ \t]*$"))
+                                 (forward-line 1))
+                               (buffer-substring-no-properties (point) (point-max)))))
+                  (json-encode
+                   `((success . t)
+                     (node_id . ,node-id)
+                     (title . ,(org-roam-node-title node))
+                     (file . ,file)
+                     (level . 0)
+                     (text . ,body)
+                     (properties . ,keywords))))
+              (let ((result
+                     (with-temp-buffer
+                       (insert raw)
+                       (org-mode)
+                       (goto-char (point-min))
+                       (when (re-search-forward
+                              (format "^[ \t]*:ID:[ \t]+%s[ \t]*$"
+                                      (regexp-quote node-id)) nil t)
+                         (list (my/api--node-body-at-point)
+                               (my/api--node-drawer-props-at-point))))))
+                (if result
+                    (json-encode
+                     `((success . t)
+                       (node_id . ,node-id)
+                       (title . ,(org-roam-node-title node))
+                       (file . ,file)
+                       (level . ,level)
+                       (text . ,(car result))
+                       (properties . ,(cadr result))))
+                  (json-encode
+                   `((success . :json-false)
+                     (error . ,(format "Node %s not found in file %s"
+                                      node-id file)))))))))
+    (error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "Error reading node: %s"
+                                    (error-message-string err))))))))
+
+(defun my/api-add-node (note-id heading text &optional properties level)
+  "Add a new heading-level node to the note with NOTE-ID.
+A generated org-roam :ID: is stored in the node's :PROPERTIES: drawer.
+PROPERTIES is an alist of additional drawer key-value pairs.
+LEVEL defaults to 1."
+  (condition-case err
+      (let* ((node (org-roam-node-from-id note-id))
+             (file (when node (org-roam-node-file node))))
+        (if (not file)
+            (json-encode `((success . :json-false)
+                          (error . ,(format "Note not found: %s" note-id))))
+          (let* ((new-id (org-id-new))
+                 (stars (make-string (or level 1) ?*)))
+            (with-current-buffer (find-file-noselect file)
+              (org-mode)
+              (goto-char (point-max))
+              (unless (bolp) (insert "\n"))
+              (insert (format "%s %s\n" stars heading))
+              (insert ":PROPERTIES:\n")
+              (insert (format ":ID: %s\n" new-id))
+              (dolist (prop (or properties '()))
+                (insert (format ":%s: %s\n" (car prop) (cdr prop))))
+              (insert ":END:\n")
+              (when (and text (not (string-empty-p (string-trim text))))
+                (insert text)
+                (unless (string-suffix-p "\n" text) (insert "\n")))
+              (my/api--save-buffer-no-hooks))
+            (org-roam-db-sync)
+            (json-encode
+             `((success . t)
+               (node_id . ,new-id)
+               (file . ,file)
+               (heading . ,heading)
+               (level . ,(or level 1)))))))
+    (error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "Error adding node: %s"
+                                    (error-message-string err))))))))
+
+(defun my/api-update-node (node-id &optional text properties)
+  "Update a node by its org-roam ID.
+TEXT replaces the body; omit to leave unchanged.
+PROPERTIES is an alist of key-value pairs to update; omit to leave unchanged.
+  File-level nodes (level 0): PROPERTIES updates #+KEYWORD: lines.
+  Heading-level nodes: PROPERTIES updates :PROPERTIES: drawer entries."
+  (condition-case err
+      (let* ((node (org-roam-node-from-id node-id))
+             (file (when node (org-roam-node-file node)))
+             (level (when node (org-roam-node-level node))))
+        (if (not node)
+            (json-encode `((success . :json-false)
+                          (error . ,(format "Node not found: %s" node-id))))
+          (with-current-buffer (find-file-noselect file)
+            (org-mode)
+            (cond
+             ((= level 0)
+              (dolist (prop (or properties '()))
+                (let ((key (car prop)) (val (cdr prop)))
+                  (goto-char (point-min))
+                  (if (re-search-forward
+                       (format "^#\\+%s:.*$" (regexp-quote key)) nil t)
+                      (replace-match (format "#+%s: %s" key val))
+                    (goto-char (point-min))
+                    (when (re-search-forward "^#\\+title:.*$" nil t)
+                      (end-of-line)
+                      (insert (format "\n#+%s: %s" key val))))))
+              (when text
+                (goto-char (point-min))
+                (when (looking-at "^[ \t]*:PROPERTIES:")
+                  (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+                  (forward-line 1))
+                (while (looking-at "^#\\+") (forward-line 1))
+                (while (and (not (eobp)) (looking-at "^[ \t]*$")) (forward-line 1))
+                (delete-region (point) (point-max))
+                (insert text)
+                (unless (string-suffix-p "\n" text) (insert "\n"))))
+             (t
+              (goto-char (point-min))
+              (unless (re-search-forward
+                       (format "^[ \t]*:ID:[ \t]+%s[ \t]*$" (regexp-quote node-id)) nil t)
+                (error "Node ID %s not found in file" node-id))
+              (org-back-to-heading t)
+              (dolist (prop (or properties '()))
+                (let ((key (car prop)) (val (cdr prop)))
+                  (save-excursion
+                    (end-of-line)
+                    (forward-line 1)
+                    (if (looking-at "^[ \t]*:PROPERTIES:")
+                        (let ((drawer-end (save-excursion
+                                           (re-search-forward "^[ \t]*:END:" nil t)
+                                           (point))))
+                          (if (re-search-forward
+                               (format "^[ \t]*:%s:.*$" (regexp-quote key)) drawer-end t)
+                              (replace-match (format ":%s: %s" key val))
+                            (goto-char drawer-end)
+                            (beginning-of-line)
+                            (insert (format ":%s: %s\n" key val))))
+                      (insert (format ":PROPERTIES:\n:ID: %s\n:%s: %s\n:END:\n"
+                                     node-id key val))))))
+              (when text
+                (let ((bounds (my/api--node-body-bounds-at-point)))
+                  (delete-region (car bounds) (cdr bounds))
+                  (goto-char (car bounds))
+                  (insert text)
+                  (unless (string-suffix-p "\n" text) (insert "\n"))))))
+            (my/api--save-buffer-no-hooks)
+            (json-encode
+             `((success . t)
+               (node_id . ,node-id)
+               (file . ,file))))))
+    (error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "Error updating node: %s"
+                                    (error-message-string err))))))))
+
+(defun my/api-delete-node (node-id)
+  "Delete a heading-level node by its org-roam ID.
+Cannot delete file-level nodes; use delete_note instead."
+  (condition-case err
+      (let* ((node (org-roam-node-from-id node-id))
+             (file (when node (org-roam-node-file node)))
+             (level (when node (org-roam-node-level node))))
+        (if (not node)
+            (json-encode `((success . :json-false)
+                          (error . ,(format "Node not found: %s" node-id))))
+          (if (= level 0)
+              (json-encode `((success . :json-false)
+                            (error . "Use delete_note to remove a file-level node")))
+            (with-current-buffer (find-file-noselect file)
+              (org-mode)
+              (goto-char (point-min))
+              (unless (re-search-forward
+                       (format "^[ \t]*:ID:[ \t]+%s[ \t]*$" (regexp-quote node-id)) nil t)
+                (error "Node ID %s not found in file" node-id))
+              (org-back-to-heading t)
+              (let ((beg (point))
+                    (end (save-excursion (org-end-of-subtree t t) (point))))
+                (delete-region beg end))
+              (my/api--save-buffer-no-hooks))
+            (org-roam-db-sync)
+            (json-encode
+             `((success . t)
+               (node_id . ,node-id)
+               (file . ,file))))))
+    (error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "Error deleting node: %s"
+                                    (error-message-string err))))))))
 
 (defun my/api-add-link (from-id to-id &optional section)
   "Add an org-roam link from one note to another.

@@ -103,56 +103,77 @@
    '((query . ((type . "string") (description . "Search query")))
      (limit . ((type . "integer") (description . "Max results") (default . 10)))))
 
-  ;; --- Read/Write ---
-  (org-roam-mcp-http--register-tool
-   "read_note"
-   "Read full content of a note by org-roam ID or path."
-   (lambda (args)
-     (let ((identifier (alist-get 'identifier args))
-           (section (alist-get 'section args)))
-       (if section
-           (my/api-read-note identifier section)
-         (my/api-read-note identifier))))
-   '((identifier . string) (section . string))
-   '("identifier")
-   '((identifier . ((type . "string") (description . "Org-roam node ID or path")))
-     (section . ((type . "string") (description . "Optional heading name to return only that section")))))
-
-  (org-roam-mcp-http--register-tool
-   "update_note"
-   "Update content in a note by appending, prepending, or replacing. Can target specific sections. A whole-file replace is guarded: it is refused if it would drop existing top-level headings or drastically shrink the note (pass force:true to override), so prefer append/prepend or section-targeted edits."
-   (lambda (args)
-     (let ((identifier (alist-get 'identifier args))
-           (content (alist-get 'content args))
-           (section (alist-get 'section args))
-           (mode (or (alist-get 'mode args) "append"))
-           (force (alist-get 'force args)))
-       (if section
-           (my/api-update-note identifier content section mode force)
-         (my/api-update-note identifier content nil mode force))))
-   '((identifier . string) (content . string) (section . string) (mode . string) (force . boolean))
-   '("identifier" "content")
-   '((identifier . ((type . "string") (description . "Org-roam node ID or path")))
-     (content . ((type . "string") (description . "Content to add to the note")))
-     (section . ((type . "string") (description . "Optional heading to target (creates if not found)")))
-     (mode . ((type . "string") (description . "append, prepend, or replace") (default . "append")))
-     (force . ((type . "boolean") (description . "Override the destructive whole-file replace guard. Leave unset; only use for a deliberate full rewrite.") (default . :json-false)))))
-
+  ;; --- Note operations (file-level) ---
   (org-roam-mcp-http--register-tool
    "create_note"
-   "Create a new org-roam note."
+   "Create a new org-roam note file. Returns note_id for use with add_node."
    (lambda (args)
      (let ((title (alist-get 'title args))
-           (content (alist-get 'content args))
-           (type (or (alist-get 'type args) "reference"))
-           (confidence (or (alist-get 'confidence args) "medium")))
-       (my/api-create-note title content type confidence)))
-   '((title . string) (content . string) (type . string) (confidence . string))
-   '("title" "content")
+           (properties (alist-get 'properties args)))
+       (my/api-create-note title properties)))
+   '((title . string) (properties . object))
+   '("title")
    '((title . ((type . "string") (description . "Title for the new note")))
-     (content . ((type . "string") (description . "Content for the new note")))
-     (type . ((type . "string") (description . "Note type (reference, video, concept)") (default . "reference")))
-     (confidence . ((type . "string") (description . "Confidence level (high, medium, low)") (default . "medium")))))
+     (properties . ((type . "object")
+                    (description . "Optional #+KEYWORD: value pairs for the file header")
+                    (additionalProperties . ((type . "string")))))))
+
+  ;; --- Node operations (heading-level) ---
+  (org-roam-mcp-http--register-tool
+   "read_node"
+   "Read a node by its org-roam ID. Returns text (body) and properties. For file-level nodes (level 0), properties are #+KEYWORD: pairs. For heading-level nodes, properties are :PROPERTIES: drawer entries."
+   (lambda (args)
+     (let ((node-id (alist-get 'node_id args)))
+       (my/api-read-node node-id)))
+   '((node_id . string))
+   '("node_id")
+   '((node_id . ((type . "string") (description . "Org-roam node ID")))))
+
+  (org-roam-mcp-http--register-tool
+   "add_node"
+   "Add a new heading-level node to an existing note. The node receives a generated org-roam :ID: in its :PROPERTIES: drawer."
+   (lambda (args)
+     (let ((note-id (alist-get 'note_id args))
+           (heading (alist-get 'heading args))
+           (text (or (alist-get 'text args) ""))
+           (properties (alist-get 'properties args))
+           (level (or (alist-get 'level args) 1)))
+       (my/api-add-node note-id heading text properties level)))
+   '((note_id . string) (heading . string) (text . string) (properties . object) (level . integer))
+   '("note_id" "heading")
+   '((note_id . ((type . "string") (description . "Org-roam ID of the parent note")))
+     (heading . ((type . "string") (description . "Heading title text (after the stars)")))
+     (text . ((type . "string") (description . "Body content for the node")))
+     (properties . ((type . "object")
+                    (description . "Drawer key-value pairs stored in :PROPERTIES: (excluding :ID:, which is auto-generated)")
+                    (additionalProperties . ((type . "string")))))
+     (level . ((type . "integer") (description . "Heading level (default 1)") (default . 1)))))
+
+  (org-roam-mcp-http--register-tool
+   "update_node"
+   "Update a node's body text and/or properties by its org-roam ID. Omit text or properties to leave them unchanged. File-level nodes (level 0): properties updates #+KEYWORD: lines. Heading-level nodes: properties updates :PROPERTIES: drawer entries."
+   (lambda (args)
+     (let ((node-id (alist-get 'node_id args))
+           (text (alist-get 'text args))
+           (properties (alist-get 'properties args)))
+       (my/api-update-node node-id text properties)))
+   '((node_id . string) (text . string) (properties . object))
+   '("node_id")
+   '((node_id . ((type . "string") (description . "Org-roam node ID")))
+     (text . ((type . "string") (description . "New body content; omit to leave unchanged")))
+     (properties . ((type . "object")
+                    (description . "Key-value pairs to update; file-level: #+KEYWORD: lines; heading-level: :PROPERTIES: drawer")
+                    (additionalProperties . ((type . "string")))))))
+
+  (org-roam-mcp-http--register-tool
+   "delete_node"
+   "Delete a heading-level node and its subtree by org-roam ID. Cannot delete file-level nodes; use delete_note for that."
+   (lambda (args)
+     (let ((node-id (alist-get 'node_id args)))
+       (my/api-delete-node node-id)))
+   '((node_id . string))
+   '("node_id")
+   '((node_id . ((type . "string") (description . "Org-roam node ID to delete")))))
 
   ;; --- Task Management ---
   (org-roam-mcp-http--register-tool
