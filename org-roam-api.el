@@ -1932,7 +1932,8 @@ PROPERTIES is an alist of key-value pairs to update; omit to leave unchanged.
             (cond
              ((= level 0)
               (dolist (prop (or properties '()))
-                (let ((key (car prop)) (val (cdr prop)))
+                (let ((key (if (symbolp (car prop)) (symbol-name (car prop)) (car prop)))
+                      (val (cdr prop)))
                   (goto-char (point-min))
                   (if (re-search-forward
                        (format "^#\\+%s:.*$" (regexp-quote key)) nil t)
@@ -1958,7 +1959,8 @@ PROPERTIES is an alist of key-value pairs to update; omit to leave unchanged.
                 (error "Node ID %s not found in file" node-id))
               (org-back-to-heading t)
               (dolist (prop (or properties '()))
-                (let ((key (car prop)) (val (cdr prop)))
+                (let ((key (if (symbolp (car prop)) (symbol-name (car prop)) (car prop)))
+                      (val (cdr prop)))
                   (save-excursion
                     (end-of-line)
                     (forward-line 1)
