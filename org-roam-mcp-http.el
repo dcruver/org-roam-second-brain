@@ -69,13 +69,15 @@
   ;; --- Search ---
   (org-roam-mcp-http--register-tool
    "search_notes"
-   "Search org-roam notes by text query."
+   "Search org-roam notes by text query (title match only, not body content)."
    (lambda (args)
-     (let ((query (alist-get 'query args)))
-       (my/api-search-notes query)))
-   '((query . string))
+     (let ((query (alist-get 'query args))
+           (node-type (alist-get 'node_type args)))
+       (my/api-search-notes query node-type)))
+   '((query . string) (node_type . string))
    '("query")
-   '((query . ((type . "string") (description . "Search query")))))
+   '((query . ((type . "string") (description . "Search query")))
+     (node_type . ((type . "string") (description . "Optional: restrict to one type — project, admin, person, blog, reference, idea, telos, daily, howto. See org-roam-schema note (id 1777502556) for what each means.")))))
 
   (org-roam-mcp-http--register-tool
    "semantic_search"
@@ -219,7 +221,7 @@
        (my/api-list-notes node-type status limit sort-by)))
    '((node_type . string) (status . string) (limit . integer) (sort_by . string))
    '()
-   '((node_type . ((type . "string") (description . "Filter by type: project, person, idea, admin, blog")))
+   '((node_type . ((type . "string") (description . "Filter by type: project, admin, person, blog, reference, idea, telos, daily, howto. See org-roam-schema note (id 1777502556) for what each means.")))
      (status . ((type . "string") (description . "Filter by status: active, stale, done, cancelled")))
      (limit . ((type . "integer") (description . "Max results") (default . 50)))
      (sort_by . ((type . "string") (description . "Sort: modified, created, title") (default . "modified")))))

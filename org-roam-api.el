@@ -144,8 +144,10 @@ PROPERTIES is an alist of #+KEYWORD: value pairs added to the file header."
        (file . ,file-path)
        (title . ,title)))))
 
-(defun my/api-search-notes (query)
-  "Search org-roam notes by QUERY."
+(defun my/api-search-notes (query &optional node-type)
+  "Search org-roam notes by QUERY (title match only, not body content).
+NODE-TYPE optionally restricts results to one type — see the org-roam-schema
+note (id 1777502556) for the current type list. Nil means all types."
   (interactive)
   (my/api--ensure-org-roam-db)
 
@@ -155,16 +157,25 @@ PROPERTIES is an alist of #+KEYWORD: value pairs added to the file header."
           (seq-filter
            (lambda (node)
              (let ((title (downcase (org-roam-node-title node))))
-               (seq-some
-                (lambda (word)
-                  (string-match-p (regexp-quote word) title))
-                query-words)))
+               (and
+                (seq-some
+                 (lambda (word)
+                   (string-match-p (regexp-quote word) title))
+                 query-words)
+                ;; Filter by node-type if specified. Property extraction only
+                ;; runs for nodes that already matched the title, not all-nodes.
+                (or (not node-type)
+                    (let* ((file (org-roam-node-file node))
+                           (props (my/api--extract-properties file))
+                           (node-type-prop (cdr (assoc "node-type" props))))
+                      (string= (downcase (or node-type-prop "")) (downcase node-type)))))))
            all-nodes))
          (node-data (mapcar #'my/api--node-to-json matching-nodes)))
 
     (my/api--json-response
      `((success . t)
        (query . ,query)
+       (node_type . ,node-type)
        (total_found . ,(length matching-nodes))
        (notes . ,node-data)))))
 
@@ -1517,7 +1528,9 @@ destructive whole-file replace."
 
 (defun my/api-list-notes (&optional node-type status limit sort-by)
   "List org-roam notes with optional filters.
-NODE-TYPE: \"project\", \"person\", \"idea\", \"admin\", \"blog\", or nil for all.
+NODE-TYPE: \"project\", \"admin\", \"person\", \"blog\", \"reference\", \"idea\",
+\"telos\", \"daily\", \"howto\", or nil for all — see the org-roam-schema note
+(id 1777502556) for what each means.
 STATUS: \"active\", \"stale\", \"done\", \"cancelled\", or nil for all.
 LIMIT: Maximum number of results (default 50).
 SORT-BY: \"created\", \"modified\", or \"title\" (default \"modified\")."
