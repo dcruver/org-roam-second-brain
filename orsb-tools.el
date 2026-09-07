@@ -247,7 +247,11 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
 (defun orsb-tools--snippet (node &optional length)
   "First LENGTH characters of NODE's body, whitespace collapsed."
   (let* ((body (condition-case nil (orsb-core-node-body node) (error "")))
-         (flat (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " body)))
+         ;; drop sub-heading drawers and #+ lines, keep heading text
+         (clean (replace-regexp-in-string
+                 "^[ \t]*\\(:[A-Za-z0-9_-]+:.*\\|#\\+.*\\)$" ""
+                 (replace-regexp-in-string "^\\*+[ \t]+" "" body)))
+         (flat (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " clean)))
          (n (or length 240)))
     (if (> (length flat) n) (concat (substring flat 0 n) "…") flat)))
 
@@ -631,9 +635,11 @@ predate NODE-TYPE)."
     (_ "Unexpected server error; retrying will not help.")))
 
 (defun orsb-tools--envelope (fn args)
-  "Run FN on ARGS and return the 2.0 JSON envelope."
+  "Run FN on ARGS and return the 2.0 JSON envelope.
+A client that sends `arguments: []` (or anything that is not an object)
+is treated as sending no arguments."
   (condition-case err
-      (json-encode `((ok . t) (data . ,(orsb--object (funcall fn args)))))
+      (json-encode `((ok . t) (data . ,(orsb--object (funcall fn (if (and (listp args) (or (null args) (consp (car args)))) args nil))))))
     (orsb-error
      (let ((code (nth 1 err)) (msg (nth 2 err)))
        (json-encode `((ok . :json-false)
