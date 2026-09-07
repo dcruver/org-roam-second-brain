@@ -396,16 +396,25 @@
    (lambda (_args)
      (condition-case err
          (let* ((d (sb/core-blog-digest-data))
-                ;; :progress is a (done . total) cons, which json-encode rejects
-                (fix (lambda (p)
-                       (let ((pr (plist-get p :progress)))
-                         (if (consp pr)
-                             (plist-put (copy-sequence p) :progress (format "%s/%s" (car pr) (cdr pr)))
-                           p)))))
+                (draft->alist
+                 (lambda (p)
+                   (let ((pr (plist-get p :progress)))
+                     `((id . ,(plist-get p :id)) (title . ,(plist-get p :title))
+                       (file . ,(plist-get p :file))
+                       (days_since_modified . ,(plist-get p :days-since-modified))
+                       (progress . ,(if (consp pr) (format "%s/%s" (car pr) (cdr pr)) pr))
+                       (has_content . ,(if (plist-get p :has-content) t :json-false))))))
+                (post->alist
+                 (lambda (p) `((id . ,(plist-get p :id)) (title . ,(plist-get p :title))
+                               (days_since_modified . ,(plist-get p :days-since-modified)))))
+                (idea->alist
+                 (lambda (n) (if (org-roam-node-p n)
+                                 `((id . ,(org-roam-node-id n)) (title . ,(org-roam-node-title n)))
+                               `((id . ,(plist-get n :id)) (title . ,(plist-get n :title)))))))
            (json-encode `((success . t)
-                          (drafts . ,(vconcat (mapcar fix (plist-get (plist-get d :drafts) :items))))
-                          (published_recent . ,(vconcat (plist-get (plist-get d :published) :recent)))
-                          (ideas . ,(vconcat (plist-get (plist-get d :ideas-for-blog) :items))))))
+                          (drafts . ,(vconcat (mapcar draft->alist (plist-get (plist-get d :drafts) :items))))
+                          (published_recent . ,(vconcat (mapcar post->alist (plist-get (plist-get d :published) :recent))))
+                          (ideas . ,(vconcat (mapcar idea->alist (plist-get (plist-get d :ideas-for-blog) :items)))))))
        (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
    '() '() '())
 
