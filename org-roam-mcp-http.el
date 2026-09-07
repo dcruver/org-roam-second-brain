@@ -395,7 +395,17 @@
    "Blog overview: drafts with outline progress, recently published posts, and idea notes that could become posts."
    (lambda (_args)
      (condition-case err
-         (json-encode `((success . t) (data . ,(sb/core-blog-digest-data))))
+         (let* ((d (sb/core-blog-digest-data))
+                ;; :progress is a (done . total) cons, which json-encode rejects
+                (fix (lambda (p)
+                       (let ((pr (plist-get p :progress)))
+                         (if (consp pr)
+                             (plist-put (copy-sequence p) :progress (format "%s/%s" (car pr) (cdr pr)))
+                           p)))))
+           (json-encode `((success . t)
+                          (drafts . ,(vconcat (mapcar fix (plist-get (plist-get d :drafts) :items))))
+                          (published_recent . ,(vconcat (plist-get (plist-get d :published) :recent)))
+                          (ideas . ,(vconcat (plist-get (plist-get d :ideas-for-blog) :items))))))
        (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
    '() '() '())
 
