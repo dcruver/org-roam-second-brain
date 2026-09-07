@@ -19,6 +19,8 @@
 ;; The tool implementations. Previously left to the user's init file, which
 ;; made every tool fail with a void-function error when it was forgotten.
 (require 'org-roam-api)
+;; The 2.0 tool contract, registered on top of the legacy tools.
+(require 'orsb-tools)
 ;; Doom-only module (after!/setq!); only loadable where those macros exist.
 ;; change_task_state reports a void-function error if it is absent.
 (when (fboundp 'after!)
@@ -54,6 +56,10 @@
 (cl-defstruct (org-roam-mcp-tool (:constructor org-roam-mcp-tool-create))
   "An MCP tool registration."
   name description fn args-spec required-args schema)
+
+(defun org-roam-mcp-http--set-tool-description (tool description)
+  "Replace TOOL's DESCRIPTION (used by orsb-tools to mark deprecations)."
+  (setf (org-roam-mcp-tool-description tool) description))
 
 (defun org-roam-mcp-http--register-tool (name description fn args-spec required-args schema)
   "Register a tool NAME with DESCRIPTION, FN, ARGS-SPEC, REQUIRED-ARGS, and SCHEMA."
@@ -598,7 +604,10 @@
        (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
    '() '() '())
 
-  (message "org-roam-mcp-http: registered %d tools" (hash-table-count org-roam-mcp-http--tools)))
+  (message "org-roam-mcp-http: registered %d legacy tools" (hash-table-count org-roam-mcp-http--tools))
+  ;; The 2.0 contract (orsb-tools.el) registers on top and marks or removes
+  ;; the legacy names according to `orsb-mcp-legacy-tools'.
+  (orsb-tools-register))
 
 ;; ---------------------------------------------------------------------------
 ;; JSON-RPC dispatch
@@ -623,13 +632,17 @@
           ;; Call the tool function
           (condition-case err
               (let ((result (funcall (org-roam-mcp-tool-fn tool) arguments)))
-                ;; result is a JSON string from my/api-* functions
-                ;; We need to parse it and re-encode in the response envelope
-                (let ((parsed (condition-case nil
-                                  (json-read-from-string result)
-                                (error result))))
+                ;; result is a JSON string. 2.0 tools return the
+                ;; {"ok":...} envelope and get MCP isError on failure;
+                ;; legacy my/api-* results are passed through unchanged
+                ;; (with the historical `note' hoist).
+                (let* ((is-error (string-prefix-p "{\"ok\":false" result))
+                       (parsed (condition-case nil
+                                   (json-read-from-string result)
+                                 (error result))))
                   (json-encode `((result . ((content . [((type . "text")
                                                          (text . ,result))])
+                                            ,@(when is-error '((isError . t)))
                                             ,@(when (and (listp parsed)
                                                          (alist-get 'note parsed))
                                                 `((note . ,(alist-get 'note parsed))))))))))

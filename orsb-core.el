@@ -274,6 +274,102 @@ For a file node the body starts after the file-level drawer and the
   (orsb-core--after-write (org-roam-node-file node))
   t)
 
+(defun orsb-core-append-body (node text &optional prepend)
+  "Append TEXT to NODE's body (or prepend with PREPEND), keeping everything else."
+  (unless (stringp text) (orsb-error 'invalid-argument "text must be a string"))
+  (orsb-core--with-node node
+    (let ((b (orsb-core--body-bounds)))
+      (if prepend
+          (progn (goto-char (car b))
+                 (insert text)
+                 (unless (string-suffix-p "\n" text) (insert "\n")))
+        (goto-char (cdr b))
+        (unless (or (bobp) (eq (char-before) ?\n)) (insert "\n"))
+        (insert text)
+        (unless (string-suffix-p "\n" text) (insert "\n")))))
+  (orsb-core--after-write (org-roam-node-file node))
+  t)
+
+(defun orsb-core-section-body (node section)
+  "Return the body of the heading titled SECTION inside NODE's subtree/file.
+Matching is case-insensitive on the heading text (TODO keywords and tags
+ignored).  Signals `not-found' when there is no such heading."
+  (orsb-core--with-node node
+    (let ((end (if (org-before-first-heading-p) (point-max)
+                 (save-excursion (org-end-of-subtree t t) (point))))
+          (found nil))
+      (while (and (not found) (re-search-forward org-heading-regexp end t))
+        (when (string-equal-ignore-case (string-trim (org-get-heading t t t t)) (string-trim section))
+          (setq found (point))))
+      (unless found
+        (orsb-error 'not-found "No heading %S under %s" section (org-roam-node-title node)))
+      (goto-char found)
+      (let ((b (orsb-core--body-bounds)))
+        (if (>= (car b) (cdr b)) ""
+          (orsb-core--strip-hidden-property-lines
+           (buffer-substring-no-properties (car b) (cdr b))))))))
+
+;;;; Title, tags, TODO
+
+(defun orsb-core-set-title (node title)
+  "Set NODE's title: the #+title: keyword for a file node, the headline otherwise."
+  (unless (and (stringp title) (not (string-blank-p title)))
+    (orsb-error 'invalid-argument "title must be a non-empty string"))
+  (if (= (org-roam-node-level node) 0)
+      (orsb-core-set-keywords node `(("TITLE" . ,title)))
+    (orsb-core--with-node node
+      (org-edit-headline title))
+    (orsb-core--after-write (org-roam-node-file node)))
+  t)
+
+(defun orsb-core-node-local-tags (node)
+  "Return NODE's own tags (filetags for a file node, heading tags otherwise)."
+  (orsb-core--with-node node
+    (if (org-before-first-heading-p)
+        (let ((kw (cdr (assoc "FILETAGS" (orsb-core-node-keywords node)))))
+          (when kw (split-string kw ":" t "[ \t]+")))
+      (org-get-tags nil t))))
+
+(defun orsb-core-set-tags (node tags)
+  "Replace NODE's own tags with TAGS (a list of strings)."
+  (dolist (tag tags)
+    (unless (and (stringp tag) (string-match-p "\\`[[:alnum:]_@#%-]+\\'" tag))
+      (orsb-error 'invalid-argument "Invalid tag %S" tag)))
+  (if (= (org-roam-node-level node) 0)
+      (orsb-core-set-keywords node `(("FILETAGS" . ,(if tags (concat ":" (string-join tags ":") ":") nil))))
+    (orsb-core--with-node node
+      (org-set-tags tags))
+    (orsb-core--after-write (org-roam-node-file node)))
+  t)
+
+(defun orsb-core-set-todo (node keyword)
+  "Set the TODO KEYWORD on heading NODE; nil or \"\" clears it."
+  (when (= (org-roam-node-level node) 0)
+    (orsb-error 'invalid-argument "todo can only be set on a heading node, not a file"))
+  (orsb-core--with-node node
+    (let ((org-inhibit-logging t)
+          (org-todo-log-states nil))
+      (org-todo (if (or (null keyword) (string-blank-p keyword)) 'none (upcase keyword)))))
+  (orsb-core--after-write (org-roam-node-file node))
+  t)
+
+;;;; Links
+
+(defun orsb-core-unlink (node target-id)
+  "Remove lines in NODE's body that link to TARGET-ID.  Return the count."
+  (let ((count 0))
+    (orsb-core--with-node node
+      (let* ((b (orsb-core--body-bounds))
+             (end (copy-marker (cdr b)))
+             (rx (concat "^.*\\[\\[id:" (regexp-quote target-id) "\\].*\n?")))
+        (goto-char (car b))
+        (while (re-search-forward rx end t)
+          (replace-match "")
+          (setq count (1+ count)))))
+    (when (> count 0)
+      (orsb-core--after-write (org-roam-node-file node)))
+    count))
+
 ;;;; Records
 
 (defun orsb-core-node-record (node &optional include-body)

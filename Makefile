@@ -4,7 +4,7 @@ EMACS ?= emacs
 ORSB_DEPS ?= $(firstword $(wildcard $(HOME)/.config/emacs/.local/straight/build-*/))
 export ORSB_DEPS
 
-SOURCES := orsb-core.el org-roam-api.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el
+SOURCES := orsb-core.el orsb-tools.el org-roam-api.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el
 
 .PHONY: test lint compile clean reload
 
@@ -13,7 +13,7 @@ test:
 
 # Files held to warnings-as-errors. Legacy files join this list as they are
 # migrated onto orsb-core (see docs: Phase 5 of the 2.0 plan).
-STRICT := orsb-core.el
+STRICT := orsb-core.el orsb-tools.el
 
 LOADPATH := --eval '(dolist (dir (split-string (or (getenv "ORSB_DEPS") "") ":" t)) (dolist (sub (directory-files (expand-file-name dir) t "\\`[^.]")) (when (and (file-directory-p sub) (not (string-match-p "org-roam-second-brain" sub))) (add-to-list (quote load-path) sub t))))' --eval '(require (quote org-roam))'
 
