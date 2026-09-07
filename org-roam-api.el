@@ -19,6 +19,7 @@
 (require 'org-roam-vector-search)
 (require 'json)
 (require 'subr-x)
+(require 'orsb-core)
 
 ;;; ============================================================================
 ;;; HELPER FUNCTIONS
@@ -1513,7 +1514,7 @@ destructive whole-file replace."
                   (goto-char (point-max))
                   (unless (bolp) (insert "\n"))
                   (insert content "\n"))))
-              (my/api--save-buffer-no-hooks)
+              (orsb-core--after-write (buffer-file-name))
               (let ((updated-content (my/api--strip-embedding-properties
                                       (buffer-substring-no-properties (point-min) (point-max)))))
                 (json-encode
@@ -1597,43 +1598,31 @@ SORT-BY: \"created\", \"modified\", or \"title\" (default \"modified\")."
 IDENTIFIER can be an org-roam ID or a path relative to org-roam-directory."
   (my/api--ensure-org-roam-db)
   (condition-case err
-      (let* ((file (cond
-                    ((and (stringp identifier)
-                          (or (file-exists-p identifier)
-                              (file-exists-p (expand-file-name identifier org-roam-directory))))
-                     (if (file-exists-p identifier)
-                         identifier
-                       (expand-file-name identifier org-roam-directory)))
-                    (t (when-let ((node (org-roam-node-from-id identifier)))
-                         (org-roam-node-file node)))))
-             (node (when file
-                     (let ((id (caar (org-roam-db-query 
-                                     [:select [id] :from nodes :where (= file $s1)] 
-                                     file))))
-                       (when id (org-roam-node-from-id id))))))
-        (if (not file)
-            (json-encode (list (cons (quote success) :json-false)
-                              (cons (quote error) (format "Note not found: %s" identifier))))
-          (let* ((properties (my/api--extract-properties file))
-                 (title (when node (org-roam-node-title node)))
-                 (tags (when node (org-roam-node-tags node)))
-                 (forward-links (org-roam-db-query
-                                [:select [dest] :from links :where (= source $s1)]
-                                (org-roam-node-id node)))
-                 (backlinks (mapcar (lambda (bl) (org-roam-node-id (org-roam-backlink-source-node bl)))
-                                   (org-roam-backlinks-get node))))
-            (json-encode
-             (list (cons (quote success) t)
-                   (cons (quote file) file)
-                   (cons (quote id) (when node (org-roam-node-id node)))
-                   (cons (quote title) title)
-                   (cons (quote status) (cdr (assoc "status" properties)))
-                   (cons (quote priority) (cdr (assoc "priority" properties)))
-                   (cons (quote node_type) (cdr (assoc "node-type" properties)))
-                   (cons (quote created) (cdr (assoc "created" properties)))
-                   (cons (quote tags) tags)
-                   (cons (quote links_to) (mapcar (function car) forward-links))
-                   (cons (quote links_from) backlinks))))))
+      (let* ((node (orsb-core-resolve identifier))
+             (file (org-roam-node-file node))
+             (properties (orsb-core-node-properties node))
+             (forward-links (org-roam-db-query
+                             [:select [dest] :from links :where (= source $s1)]
+                             (org-roam-node-id node)))
+             (backlinks (mapcar (lambda (bl) (org-roam-node-id (org-roam-backlink-source-node bl)))
+                                (org-roam-backlinks-get node))))
+        (json-encode
+         (list (cons 'success t)
+               (cons 'file file)
+               (cons 'id (org-roam-node-id node))
+               (cons 'title (org-roam-node-title node))
+               (cons 'level (org-roam-node-level node))
+               (cons 'status (cdr (assoc "STATUS" properties)))
+               (cons 'priority (cdr (assoc "PRIORITY" properties)))
+               (cons 'node_type (cdr (assoc "NODE-TYPE" properties)))
+               (cons 'created (cdr (assoc "CREATED" properties)))
+               (cons 'properties (or properties :empty-object))
+               (cons 'tags (vconcat (org-roam-node-tags node)))
+               (cons 'links_to (mapcar #'car forward-links))
+               (cons 'links_from backlinks))))
+    (orsb-error
+     (json-encode (list (cons 'success :json-false)
+                        (cons 'error (format "%s (%s)" (nth 2 err) (nth 1 err))))))
     (error
      (json-encode (list (cons (quote success) :json-false)
                        (cons (quote error) (format "Error getting properties: %s" (error-message-string err))))))))
@@ -1834,59 +1823,22 @@ Returns text (body content), properties, title, level, and file.
 For file-level nodes (level 0): properties are #+KEYWORD: pairs.
 For heading-level nodes: properties are :PROPERTIES: drawer entries."
   (condition-case err
-      (let* ((node (org-roam-node-from-id node-id))
-             (file (when node (org-roam-node-file node)))
-             (level (when node (org-roam-node-level node))))
-        (if (not node)
-            (json-encode `((success . :json-false)
-                          (error . ,(format "Node not found: %s" node-id))))
-          (let ((raw (with-temp-buffer
-                       (insert-file-contents file)
-                       (buffer-string))))
-            (if (= level 0)
-                (let* ((stripped (my/api--strip-embedding-properties raw))
-                       (keywords (my/api--extract-file-keywords stripped))
-                       (body (with-temp-buffer
-                               (insert stripped)
-                               (goto-char (point-min))
-                               (when (looking-at "^[ \t]*:PROPERTIES:")
-                                 (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-                                 (forward-line 1))
-                               (while (looking-at "^#\\+") (forward-line 1))
-                               (while (and (not (eobp)) (looking-at "^[ \t]*$"))
-                                 (forward-line 1))
-                               (buffer-substring-no-properties (point) (point-max)))))
-                  (json-encode
-                   `((success . t)
-                     (node_id . ,node-id)
-                     (title . ,(org-roam-node-title node))
-                     (file . ,file)
-                     (level . 0)
-                     (text . ,body)
-                     (properties . ,keywords))))
-              (let ((result
-                     (with-temp-buffer
-                       (insert raw)
-                       (org-mode)
-                       (goto-char (point-min))
-                       (when (re-search-forward
-                              (format "^[ \t]*:ID:[ \t]+%s[ \t]*$"
-                                      (regexp-quote node-id)) nil t)
-                         (list (my/api--node-body-at-point)
-                               (my/api--node-drawer-props-at-point))))))
-                (if result
-                    (json-encode
-                     `((success . t)
-                       (node_id . ,node-id)
-                       (title . ,(org-roam-node-title node))
-                       (file . ,file)
-                       (level . ,level)
-                       (text . ,(car result))
-                       (properties . ,(cadr result))))
-                  (json-encode
-                   `((success . :json-false)
-                     (error . ,(format "Node %s not found in file %s"
-                                      node-id file))))))))))
+      (let* ((node (orsb-core-resolve node-id))
+             (record (orsb-core-node-record node t)))
+        (json-encode
+         `((success . t)
+           (node_id . ,(org-roam-node-id node))
+           (title . ,(org-roam-node-title node))
+           (file . ,(org-roam-node-file node))
+           (level . ,(org-roam-node-level node))
+           (text . ,(alist-get 'body record))
+           (properties . ,(alist-get 'properties record))
+           (keywords . ,(alist-get 'keywords record))
+           (tags . ,(alist-get 'tags record))
+           (todo . ,(alist-get 'todo record)))))
+    (orsb-error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "%s (%s)" (nth 2 err) (nth 1 err))))))
     (error
      (json-encode `((success . :json-false)
                    (error . ,(format "Error reading node: %s"
@@ -1932,78 +1884,26 @@ LEVEL defaults to 1."
                                     (error-message-string err))))))))
 
 (defun my/api-update-node (node-id &optional text properties)
-  "Update a node by its org-roam ID.
+  "Update a node by its org-roam ID (or path / title, via `orsb-core-resolve').
 TEXT replaces the body; omit to leave unchanged.
-PROPERTIES is an alist of key-value pairs to update; omit to leave unchanged.
-  File-level nodes (level 0): PROPERTIES updates #+KEYWORD: lines.
-  Heading-level nodes: PROPERTIES updates :PROPERTIES: drawer entries."
+PROPERTIES is an alist of key-value pairs written to the node's :PROPERTIES:
+drawer (the file-level drawer for a file node, the heading drawer otherwise);
+keys are upper-cased, a null or empty value deletes the property.  Omit to
+leave the drawer unchanged.  The org-roam db is updated for the file."
   (condition-case err
-      (let* ((node (org-roam-node-from-id node-id))
-             (file (when node (org-roam-node-file node)))
-             (level (when node (org-roam-node-level node))))
-        (if (not node)
-            (json-encode `((success . :json-false)
-                          (error . ,(format "Node not found: %s" node-id))))
-          (with-current-buffer (find-file-noselect file)
-            (org-mode)
-            (cond
-             ((= level 0)
-              (dolist (prop (or properties '()))
-                (let ((key (if (symbolp (car prop)) (symbol-name (car prop)) (car prop)))
-                      (val (cdr prop)))
-                  (goto-char (point-min))
-                  (if (re-search-forward
-                       (format "^#\\+%s:.*$" (regexp-quote key)) nil t)
-                      (replace-match (format "#+%s: %s" key val))
-                    (goto-char (point-min))
-                    (when (re-search-forward "^#\\+title:.*$" nil t)
-                      (end-of-line)
-                      (insert (format "\n#+%s: %s" key val))))))
-              (when text
-                (goto-char (point-min))
-                (when (looking-at "^[ \t]*:PROPERTIES:")
-                  (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-                  (forward-line 1))
-                (while (looking-at "^#\\+") (forward-line 1))
-                (while (and (not (eobp)) (looking-at "^[ \t]*$")) (forward-line 1))
-                (delete-region (point) (point-max))
-                (insert text)
-                (unless (string-suffix-p "\n" text) (insert "\n"))))
-             (t
-              (goto-char (point-min))
-              (unless (re-search-forward
-                       (format "^[ \t]*:ID:[ \t]+%s[ \t]*$" (regexp-quote node-id)) nil t)
-                (error "Node ID %s not found in file" node-id))
-              (org-back-to-heading t)
-              (dolist (prop (or properties '()))
-                (let ((key (if (symbolp (car prop)) (symbol-name (car prop)) (car prop)))
-                      (val (cdr prop)))
-                  (save-excursion
-                    (end-of-line)
-                    (forward-line 1)
-                    (if (looking-at "^[ \t]*:PROPERTIES:")
-                        (let ((drawer-end (save-excursion
-                                           (re-search-forward "^[ \t]*:END:" nil t)
-                                           (point))))
-                          (if (re-search-forward
-                               (format "^[ \t]*:%s:.*$" (regexp-quote key)) drawer-end t)
-                              (replace-match (format ":%s: %s" key val))
-                            (goto-char drawer-end)
-                            (beginning-of-line)
-                            (insert (format ":%s: %s\n" key val))))
-                      (insert (format ":PROPERTIES:\n:ID: %s\n:%s: %s\n:END:\n"
-                                     node-id key val))))))
-              (when text
-                (let ((bounds (my/api--node-body-bounds-at-point)))
-                  (delete-region (car bounds) (cdr bounds))
-                  (goto-char (car bounds))
-                  (insert text)
-                  (unless (string-suffix-p "\n" text) (insert "\n"))))))
-            (my/api--save-buffer-no-hooks)
-            (json-encode
-             `((success . t)
-               (node_id . ,node-id)
-               (file . ,file))))))
+      (let ((node (orsb-core-resolve node-id)))
+        (when properties
+          (orsb-core-set-properties node properties))
+        (when text
+          (orsb-core-set-body node text))
+        (json-encode
+         `((success . t)
+           (node_id . ,(org-roam-node-id node))
+           (file . ,(org-roam-node-file node))
+           (properties . ,(or (orsb-core-node-properties node) :empty-object)))))
+    (orsb-error
+     (json-encode `((success . :json-false)
+                   (error . ,(format "%s (%s)" (nth 2 err) (nth 1 err))))))
     (error
      (json-encode `((success . :json-false)
                    (error . ,(format "Error updating node: %s"
