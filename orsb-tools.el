@@ -54,7 +54,7 @@
   :type '(repeat string)
   :group 'orsb)
 
-(defcustom orsb-blog-status-values '("idea" "draft" "published")
+(defcustom orsb-blog-status-values '("idea" "stub" "draft" "published")
   "Allowed STATUS values for blog nodes, whose lifecycle differs from projects'."
   :type '(repeat string)
   :group 'orsb)
@@ -261,9 +261,22 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
           (t nil))))
 
 (defun orsb-tools--blog-node-p (node-or-type)
-  "Whether NODE-OR-TYPE (a node or a NODE-TYPE string) is a blog node."
-  (equal "blog" (if (stringp node-or-type) node-or-type
-                  (cdr (assoc "NODE-TYPE" (org-roam-node-properties node-or-type))))))
+  "Whether NODE-OR-TYPE (a node or a NODE-TYPE string) is a blog node.
+A node counts as blog when its NODE-TYPE says so, when it lives in the
+blog directory, or when its file carries Hugo export keywords (older posts
+predate NODE-TYPE)."
+  (if (stringp node-or-type)
+      (equal "blog" node-or-type)
+    (let* ((node node-or-type)
+           (type (cdr (assoc "NODE-TYPE" (org-roam-node-properties node))))
+           (blog-dir (or (cdr (assoc "blog" orsb-node-types)) "blog")))
+      (cond
+       (type (equal type "blog"))
+       ((string-prefix-p (file-name-as-directory (expand-file-name blog-dir org-roam-directory))
+                         (org-roam-node-file node))
+        t)
+       (t (seq-some (lambda (kw) (string-prefix-p "HUGO" (car kw)))
+                    (orsb-core-node-keywords node)))))))
 
 (defun orsb-tools--status-values-for (node-or-type)
   "The status vocabulary that applies to NODE-OR-TYPE."
