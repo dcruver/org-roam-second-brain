@@ -29,7 +29,15 @@
 (require 'subr-x)
 (require 'org-roam)
 (require 'orsb-core)
+;; Semantic search, stale detection and the embedding queue. Optional: the
+;; tools degrade to "unavailable" errors when it is not loadable.
+(require 'orsb-search nil t)
 
+(declare-function orsb-search-similar "orsb-search")
+(declare-function orsb-search-file-stale-p "orsb-search")
+(declare-function orsb-search-generate-file "orsb-search")
+(declare-function orsb-search-backfill-hashes "orsb-search")
+(declare-function orsb-search-enqueue "orsb-search")
 (declare-function org-roam-mcp-http--register-tool "org-roam-mcp-http")
 (declare-function org-roam-mcp-tool-fn "org-roam-mcp-http")
 (declare-function org-roam-mcp-tool-description "org-roam-mcp-http")
@@ -240,6 +248,9 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
        (modified . ,(alist-get 'modified rec))
        (days_since_modified . ,(alist-get 'days_since_modified light))
        (stale . ,(alist-get 'stale light))
+       (embedding_stale . ,(if (and (fboundp 'orsb-search-file-stale-p)
+                                    (ignore-errors (orsb-search-file-stale-p (org-roam-node-file node))))
+                               t :json-false))
        (links_to . ,(orsb--vector (car links)))
        (links_from . ,(orsb--vector (cdr links))))
      (when include-body `((body . ,(alist-get 'body rec)))))))
@@ -323,10 +334,12 @@ predate NODE-TYPE)."
                        (n (orsb-core--first-node-in-file file)))
              (push (cons n (/ (float score) (length words))) hits)))))
       ("semantic"
-       (unless (fboundp 'org-roam-semantic-get-similar-data)
-         (orsb-error 'unavailable "Semantic search is not loaded (org-roam-vector-search)"))
+       (unless (fboundp 'orsb-search-similar)
+         (orsb-error 'unavailable "Semantic search is not loaded (orsb-search)"))
        (let ((seen (make-hash-table :test 'equal)))
-         (dolist (r (org-roam-semantic-get-similar-data query (* 3 limit) cutoff))
+         (dolist (r (condition-case err
+                        (orsb-search-similar query (* 3 limit) cutoff)
+                      (error (orsb-error 'unavailable "Semantic search failed: %s" (error-message-string err)))))
            (let ((file (car r)) (score (cadr r)))
              (unless (gethash file seen)
                (when-let ((n (orsb-core--first-node-in-file file)))
@@ -596,20 +609,25 @@ rebuild (the only remedy when the db and the files disagree)."
         (embeddings (orsb-arg-bool args 'embeddings))
         (full (orsb-arg-bool args 'full))
         (wait (orsb-arg-bool args 'wait)))
+    (when (and embeddings (not (fboundp 'orsb-search-generate-file)))
+      (orsb-error 'unavailable "Embedding generation is not loaded (orsb-search)"))
     (cond
-     (id (let ((node (orsb-core-resolve id)))
-           (org-roam-db-update-file (org-roam-node-file node))
-           (when embeddings
-             (unless (fboundp 'my/api--generate-and-save-embedding)
-               (orsb-error 'unavailable "Embedding generation is not loaded"))
-             (my/api--generate-and-save-embedding (org-roam-node-file node)))
-           `((synced . ,(orsb-tools--relative (org-roam-node-file node))) (embeddings . ,(if embeddings t :json-false)))))
+     (id (let* ((node (orsb-core-resolve id))
+                (file (org-roam-node-file node)))
+           (org-roam-db-update-file file)
+           (let ((done (when embeddings (orsb-search-generate-file file full))))
+             `((synced . ,(orsb-tools--relative file))
+               (embeddings . ,(if embeddings t :json-false))
+               (generated . ,(or (car done) 0))
+               (skipped . ,(or (cdr done) 0))))))
      (t
-      (when (and embeddings (not (fboundp 'org-roam-semantic-generate-all-embeddings)))
-        (orsb-error 'unavailable "Embedding generation is not loaded"))
       (let ((work (lambda ()
                     (if full (org-roam-db-sync 'force) (org-roam-db-sync))
-                    (when embeddings (org-roam-semantic-generate-all-embeddings)))))
+                    (when embeddings
+                      ;; hashes first so unchanged notes are not re-embedded,
+                      ;; then queue every note for the idle worker
+                      (orsb-search-backfill-hashes)
+                      (dolist (f (org-roam-list-files)) (orsb-search-enqueue f))))))
         (if wait
             (progn (funcall work)
                    `((synced . "db") (full . ,(if full t :json-false)) (embeddings . ,(if embeddings t :json-false))))

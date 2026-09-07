@@ -129,7 +129,10 @@ request path; the embedding refresh is queued separately."
 Every mutation ends here."
   (with-current-buffer (find-file-noselect file)
     (orsb-core--save-quietly))
-  (org-roam-db-update-file file))
+  (org-roam-db-update-file file)
+  ;; Embeddings are refreshed by the idle worker, never on the request path.
+  (when (fboundp 'orsb-search-enqueue)
+    (orsb-search-enqueue file)))
 
 (defun orsb-core-db-refresh (&rest files)
   "Bring the org-roam db up to date for FILES only (no full scan).

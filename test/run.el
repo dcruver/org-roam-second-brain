@@ -31,8 +31,10 @@
     (message "org-roam not found on load-path; set ORSB_DEPS to a directory of package builds")
     (kill-emacs 2))
   (require 'ert)
+  ;; Test files may `require' each other's fixtures; load each once.
   (dolist (f (directory-files here t "-test\\.el\\'"))
-    (load f nil t))
+    (unless (featurep (intern (file-name-base f)))
+      (load f nil t)))
   (ert-run-tests-batch-and-exit (or (getenv "ORSB_TEST_SELECTOR") t)))
 
 ;;; run.el ends here
