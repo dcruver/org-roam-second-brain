@@ -54,6 +54,11 @@
   :type '(repeat string)
   :group 'orsb)
 
+(defcustom orsb-blog-status-values '("idea" "draft" "published")
+  "Allowed STATUS values for blog nodes, whose lifecycle differs from projects'."
+  :type '(repeat string)
+  :group 'orsb)
+
 (defcustom orsb-status-aliases
   '(("completed" . "done") ("finished" . "done") ("closed" . "done")
     ("shelved" . "someday") ("paused" . "waiting") ("on-hold" . "waiting")
@@ -255,12 +260,22 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
           ((assoc v orsb-status-aliases) (cdr (assoc v orsb-status-aliases)))
           (t nil))))
 
-(defun orsb-tools--check-status (value)
-  "Return VALUE if it is an allowed status, else signal `invalid-argument'."
-  (let ((v (downcase (string-trim value))))
-    (if (member v orsb-status-values) v
+(defun orsb-tools--blog-node-p (node-or-type)
+  "Whether NODE-OR-TYPE (a node or a NODE-TYPE string) is a blog node."
+  (equal "blog" (if (stringp node-or-type) node-or-type
+                  (cdr (assoc "NODE-TYPE" (org-roam-node-properties node-or-type))))))
+
+(defun orsb-tools--status-values-for (node-or-type)
+  "The status vocabulary that applies to NODE-OR-TYPE."
+  (if (orsb-tools--blog-node-p node-or-type) orsb-blog-status-values orsb-status-values))
+
+(defun orsb-tools--check-status (value &optional node-or-type)
+  "Return VALUE if it is an allowed status for NODE-OR-TYPE, else signal."
+  (let* ((v (downcase (string-trim value)))
+         (allowed (orsb-tools--status-values-for node-or-type)))
+    (if (member v allowed) v
       (orsb-error 'invalid-argument "status must be one of %s (got %S)"
-                  (string-join orsb-status-values ", ") value))))
+                  (string-join allowed ", ") value))))
 
 ;;;; Tool implementations (each takes the decoded args alist, returns data)
 
@@ -383,7 +398,7 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
   (let* ((type (orsb-arg args 'node_type))
          (title (orsb-arg args 'title))
          (body (orsb-arg args 'body))
-         (status (when-let ((s (orsb-arg args 'status))) (orsb-tools--check-status s)))
+         (status (when-let ((s (orsb-arg args 'status))) (orsb-tools--check-status s type)))
          (result
           (pcase type
             ("project" (orsb-tools--legacy "create_project"
@@ -442,7 +457,7 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
       (orsb-core-set-title node title) (push "title" changed)
       (setq node (orsb-core-resolve (org-roam-node-id node))))
     (when-let ((status (orsb-arg args 'status)))
-      (orsb-core-set-properties node `(("STATUS" . ,(orsb-tools--check-status status)))) (push "status" changed))
+      (orsb-core-set-properties node `(("STATUS" . ,(orsb-tools--check-status status node)))) (push "status" changed))
     (when (assq 'todo args)
       (orsb-core-set-todo node (orsb-arg args 'todo)) (push "todo" changed))
     (when-let ((props (orsb-arg-props args 'properties)))
@@ -583,6 +598,7 @@ A legacy {\"success\":false,...} reply is re-signalled as `orsb-error'."
     (id_forms . ["org-roam id" "path relative to the vault, or absolute" "exact title or alias"])
     (node_types . ,(orsb--vector (mapcar (lambda (c) `((type . ,(car c)) (directory . ,(cdr c)))) orsb-node-types)))
     (status_values . ,(orsb--vector orsb-status-values))
+    (blog_status_values . ,(orsb--vector orsb-blog-status-values))
     (status_aliases . ,(orsb--object orsb-status-aliases))
     (stale_days . ,orsb-stale-days)
     (property_keys . ,(orsb--vector orsb-known-property-keys))
@@ -804,18 +820,22 @@ Interactively, shows the report; with a prefix argument, applies it.
 Also moves a #+STATUS: keyword into the drawer.  Unrecognized free-text
 values are listed and left alone."
   (interactive "P")
-  (let ((plan nil) (unknown nil))
+  (let ((plan nil) (unknown nil) (blog 0))
     (dolist (node (seq-filter (lambda (n) (= (org-roam-node-level n) 0)) (org-roam-node-list)))
       (let* ((props (org-roam-node-properties node))
              (drawer (cdr (assoc "STATUS" props)))
              (kw (cdr (assoc "STATUS" (orsb-core-node-keywords node))))
              (raw (or drawer kw)))
         (when raw
-          (let ((canon (orsb-tools--canonical-status raw)))
-            (cond
-             ((null canon) (push (cons (org-roam-node-title node) raw) unknown))
-             ((or kw (not (equal raw canon)))
-              (push (list node raw canon (and kw t)) plan)))))))
+          (if (orsb-tools--blog-node-p node)
+              ;; Blog nodes have their own lifecycle (idea/draft/published);
+              ;; never fold it into the project vocabulary.
+              (setq blog (1+ blog))
+            (let ((canon (orsb-tools--canonical-status raw)))
+              (cond
+               ((null canon) (push (cons (org-roam-node-title node) raw) unknown))
+               ((or kw (not (equal raw canon)))
+                (push (list node raw canon (and kw t)) plan))))))))
     (when apply
       (dolist (p plan)
         (pcase-let ((`(,node ,_raw ,canon ,from-kw) p))
@@ -827,7 +847,8 @@ values are listed and left alone."
                                                   (if (nth 3 p) " (from #+STATUS:)" "")))
                               (reverse plan) "\n")
                    (format "\n%d unrecognized value(s) left alone:\n" (length unknown))
-                   (mapconcat (lambda (u) (format "  %s: %S" (car u) (cdr u))) (reverse unknown) "\n"))))
+                   (mapconcat (lambda (u) (format "  %s: %S" (car u) (cdr u))) (reverse unknown) "\n")
+                   (format "\n%d blog note(s) keep their own lifecycle (%s)." blog (string-join orsb-blog-status-values "/")))))
       (if (called-interactively-p 'any)
           (with-current-buffer (get-buffer-create "*orsb status migration*")
             (erase-buffer) (insert report) (display-buffer (current-buffer)))
