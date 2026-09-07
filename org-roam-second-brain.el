@@ -80,7 +80,7 @@ Alist mapping node type symbols to subdirectory names under `org-roam-directory'
   :type 'string
   :group 'sb)
 
-(defcustom sb/hugo-base-dir "~/Projects/hullabalooing/blog"
+(defcustom sb/hugo-base-dir "~/Projects/cruver.network/blog/"
   "Path to Hugo site root directory.
 Used by blog publishing functions to locate content directory."
   :type 'directory
@@ -619,6 +619,7 @@ Returns plist with :id, :file, :title, :section."
       (insert ":END:\n")
       (insert (format "#+title: %s\n" title))
       (insert (format "#+date: %s\n" date))
+      (insert (format "#+hugo_base_dir: %s\n" sb/hugo-base-dir))
       (insert "#+hugo_draft: true\n")
       (insert "#+hugo_tags: \n")
       (insert (format "#+hugo_categories: %s\n\n"

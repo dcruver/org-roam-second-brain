@@ -355,6 +355,50 @@
      (linked_note_id . ((type . "string") (description . "Optional linked note ID")))
      (linked_note_title . ((type . "string") (description . "Optional linked note title")))))
 
+  ;; --- Blog (used by the homelab agent's blog_draft / blog_drafts tools) ---
+  (org-roam-mcp-http--register-tool
+   "create_blog_post"
+   "Create a blog post note (node type blog, ox-hugo header, hugo_draft true) in SECTION with BODY as the draft text. Returns id, file and slug."
+   (lambda (args)
+     (let ((title (alist-get 'title args))
+           (section (alist-get 'section args))
+           (body (or (alist-get 'body args) ""))
+           (tags (or (alist-get 'tags args) "")))
+       (condition-case err
+           (let* ((res (sb/core-create-blog title section))
+                  (file (plist-get res :file)))
+             (with-current-buffer (find-file-noselect file)
+               (goto-char (point-min))
+               (when (and (stringp tags) (> (length tags) 0)
+                          (re-search-forward "^#\\+hugo_tags: *$" nil t))
+                 (replace-match (format "#+hugo_tags: %s" tags)))
+               (goto-char (point-min))
+               (if (re-search-forward "^\\* Draft\\s-*$" nil t)
+                   (progn (end-of-line) (insert "\n\n" body "\n"))
+                 (goto-char (point-max))
+                 (insert "\n* Draft\n\n" body "\n"))
+               (save-buffer)
+               (kill-buffer (current-buffer)))
+             (org-roam-db-sync)
+             (json-encode `((success . t) (id . ,(plist-get res :id)) (file . ,file)
+                            (title . ,title) (slug . ,(plist-get res :slug)) (section . ,section))))
+         (error (json-encode `((success . :json-false) (error . ,(error-message-string err))))))))
+   '((title . string) (section . string) (body . string) (tags . string))
+   '("title" "section" "body")
+   '((title . ((type . "string") (description . "Post title")))
+     (section . ((type . "string") (description . "Hugo section: signalscope, health-tracking, homelab, gpu-ai, second-brain, cyberdeck, side-projects, writing")))
+     (body . ((type . "string") (description . "Org-mode body of the draft (headings as * / **)")))
+     (tags . ((type . "string") (description . "Optional comma-separated hugo tags")))))
+
+  (org-roam-mcp-http--register-tool
+   "blog_status"
+   "Blog overview: drafts with outline progress, recently published posts, and idea notes that could become posts."
+   (lambda (_args)
+     (condition-case err
+         (json-encode `((success . t) (data . ,(sb/core-blog-digest-data))))
+       (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
+   '() '() '())
+
   (org-roam-mcp-http--register-tool
    "log_to_inbox"
    "Quick log to inbox."
