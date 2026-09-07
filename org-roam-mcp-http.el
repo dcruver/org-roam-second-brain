@@ -16,6 +16,13 @@
 (require 'json)
 (require 'cl-lib)
 (require 'org-id)
+;; The tool implementations. Previously left to the user's init file, which
+;; made every tool fail with a void-function error when it was forgotten.
+(require 'org-roam-api)
+;; Doom-only module (after!/setq!); only loadable where those macros exist.
+;; change_task_state reports a void-function error if it is absent.
+(when (fboundp 'after!)
+  (require 'org-agenda-project-tracking nil t))
 
 (defvar org-roam-mcp-http--port 8007
   "Port for the org-roam MCP HTTP server.")
@@ -167,16 +174,24 @@
 
   (org-roam-mcp-http--register-tool
    "update_node"
-   "Update a node's body text and/or properties by its org-roam ID. Omit text or properties to leave them unchanged. File-level nodes (level 0): properties updates #+KEYWORD: lines. Heading-level nodes: properties updates :PROPERTIES: drawer entries."
+   "Update a node's body text and/or properties by its org-roam ID. Omit text or properties to leave them unchanged. properties writes the node's :PROPERTIES: drawer (file-level drawer for a file node, heading drawer for a heading node); keys are upper-cased, e.g. {\"STATUS\":\"done\"}. With section, content replaces just that heading's body (update_note replace semantics)."
    (lambda (args)
      (let ((node-id (alist-get 'node_id args))
-           (text (alist-get 'text args))
+           (text (or (alist-get 'text args) (alist-get 'content args)))
+           (section (alist-get 'section args))
            (properties (alist-get 'properties args)))
-       (my/api-update-node node-id text properties)))
-   '((node_id . string) (text . string) (properties . object))
+       (if (and section text)
+           ;; blog_revise's shape: replace one section's body, keep the rest.
+           (progn
+             (when properties (my/api-update-node node-id nil properties))
+             (my/api-update-note node-id text section "replace" nil))
+         (my/api-update-node node-id text properties))))
+   '((node_id . string) (text . string) (content . string) (section . string) (properties . object))
    '("node_id")
    '((node_id . ((type . "string") (description . "Org-roam node ID")))
      (text . ((type . "string") (description . "New body content; omit to leave unchanged")))
+     (content . ((type . "string") (description . "Alias of text")))
+     (section . ((type . "string") (description . "Heading whose body text/content replaces; omit to replace the whole node body")))
      (properties . ((type . "object")
                     (description . "Key-value pairs to update; file-level: #+KEYWORD: lines; heading-level: :PROPERTIES: drawer")
                     (additionalProperties . ((type . "string")))))))
@@ -544,13 +559,31 @@
    '((file_path . ((type . "string") (description . "Absolute path to the org file")))))
 
   (org-roam-mcp-http--register-tool
+   "update_note"
+   "Update content in a note by appending, prepending, or replacing. Can target a section by heading. A whole-file replace is guarded: it is refused if it would drop existing top-level headings or drastically shrink the note (pass force:true to override), so prefer append/prepend or section-targeted edits. Use update_node to change properties."
+   (lambda (args)
+     (let ((identifier (alist-get 'identifier args))
+           (content (alist-get 'content args))
+           (section (alist-get 'section args))
+           (mode (or (alist-get 'mode args) "append"))
+           (force (let ((f (alist-get 'force args))) (and f (not (eq f :json-false))))))
+       (my/api-update-note identifier content section mode force)))
+   '((identifier . string) (content . string) (section . string) (mode . string) (force . boolean))
+   '("identifier" "content")
+   '((identifier . ((type . "string") (description . "Org-roam node ID or path relative to the vault")))
+     (content . ((type . "string") (description . "Content to add or the replacement text")))
+     (section . ((type . "string") (description . "Optional heading to target (created if not found)")))
+     (mode . ((type . "string") (enum . ("append" "prepend" "replace")) (description . "append, prepend, or replace") (default . "append")))
+     (force . ((type . "boolean") (description . "Override the destructive whole-file replace guard. Leave unset; only use for a deliberate full rewrite.") (default . :json-false)))))
+
+  (org-roam-mcp-http--register-tool
    "generate_embeddings"
    "Generate embeddings for all notes (batch operation). WARNING: slow, processes all 1500+ notes."
    (lambda (_args)
      (condition-case err
          (progn
-           (org-roam-semantic-generate-embeddings)
-           (json-encode '((success . t) (message . "Batch embedding generation started"))))
+           (org-roam-semantic-generate-all-embeddings)
+           (json-encode '((success . t) (message . "Batch embedding generation finished"))))
        (error (json-encode `((success . :json-false) (error . ,(error-message-string err)))))))
    '() '() '())
 

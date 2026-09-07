@@ -247,7 +247,7 @@ Returns semantically similar notes with full content for RAG applications."
 
     (error
      (my/api--json-response
-      `((success . nil)
+      `((success . :json-false)
         (error . ,(format "Semantic search failed: %s. Ensure org-roam-semantic is loaded and embeddings are generated." (error-message-string err)))
         (fallback_available . t))))))
 
@@ -1698,9 +1698,13 @@ NEW-TITLE is the new title for the note."
             (when (re-search-forward "^#\\+title:.*$" nil t)
               (replace-match (format "#+title: %s" new-title)))
             (my/api--save-buffer-no-hooks))
-          (let* ((node (org-roam-node-at-point))
+          ;; The file-level node's id, looked up in the db by file. The old
+          ;; org-roam-node-at-point call ran in the caller's buffer and always
+          ;; returned nil, so files were renamed with an unrelated timestamp.
+          (let* ((id (caar (org-roam-db-query
+                            [:select [id] :from nodes :where (and (= file $s1) (= level 0))]
+                            file)))
                  (new-slug (downcase (replace-regexp-in-string "[^a-zA-Z0-9]+" "-" new-title)))
-                 (id (when node (org-roam-node-id node)))
                  (new-filename (format "%s-%s.org" new-slug (or id (format-time-string "%s"))))
                  (new-path (expand-file-name new-filename (file-name-directory file))))
             (unless (string= file new-path)
