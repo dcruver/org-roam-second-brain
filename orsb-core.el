@@ -131,6 +131,18 @@ Every mutation ends here."
     (orsb-core--save-quietly))
   (org-roam-db-update-file file))
 
+(defun orsb-core-db-refresh (&rest files)
+  "Bring the org-roam db up to date for FILES only (no full scan).
+A file that no longer exists is cleared from the db; nil entries are
+ignored.  A full `org-roam-db-sync' walks every note and freezes Emacs for
+seconds; on the MCP request path this is the replacement."
+  (dolist (file files)
+    (when file
+      (let ((file (file-truename file)))
+        (if (file-exists-p file)
+            (org-roam-db-update-file file)
+          (org-roam-db-clear-file file))))))
+
 ;;;; Properties
 
 (defun orsb-core--hidden-key-p (key)

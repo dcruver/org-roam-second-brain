@@ -587,10 +587,15 @@ predate NODE-TYPE)."
   (orsb-tools--legacy "blog_status" nil))
 
 (defun orsb-tool-sync (args)
-  "sync {id, embeddings, full}."
+  "sync {id, embeddings, full, wait}.
+With id: update that note's db row now (and its embeddings if asked).
+Otherwise a full scan is queued for idle time so the request path stays
+responsive; wait=true runs it synchronously instead.  full=true forces a
+rebuild (the only remedy when the db and the files disagree)."
   (let ((id (orsb-arg args 'id))
         (embeddings (orsb-arg-bool args 'embeddings))
-        (full (orsb-arg-bool args 'full)))
+        (full (orsb-arg-bool args 'full))
+        (wait (orsb-arg-bool args 'wait)))
     (cond
      (id (let ((node (orsb-core-resolve id)))
            (org-roam-db-update-file (org-roam-node-file node))
@@ -599,15 +604,18 @@ predate NODE-TYPE)."
                (orsb-error 'unavailable "Embedding generation is not loaded"))
              (my/api--generate-and-save-embedding (org-roam-node-file node)))
            `((synced . ,(orsb-tools--relative (org-roam-node-file node))) (embeddings . ,(if embeddings t :json-false)))))
-     (full (if embeddings
-               (progn
-                 (unless (fboundp 'org-roam-semantic-generate-all-embeddings)
-                   (orsb-error 'unavailable "Embedding generation is not loaded"))
-                 (run-with-idle-timer 1 nil #'org-roam-semantic-generate-all-embeddings)
-                 '((queued . t) (what . "embeddings for every note; runs when Emacs is idle")))
-             (org-roam-db-sync)
-             '((synced . "db") (full . t))))
-     (t (org-roam-db-sync) '((synced . "db"))))))
+     (t
+      (when (and embeddings (not (fboundp 'org-roam-semantic-generate-all-embeddings)))
+        (orsb-error 'unavailable "Embedding generation is not loaded"))
+      (let ((work (lambda ()
+                    (if full (org-roam-db-sync 'force) (org-roam-db-sync))
+                    (when embeddings (org-roam-semantic-generate-all-embeddings)))))
+        (if wait
+            (progn (funcall work)
+                   `((synced . "db") (full . ,(if full t :json-false)) (embeddings . ,(if embeddings t :json-false))))
+          (run-with-idle-timer 1 nil work)
+          `((queued . t) (full . ,(if full t :json-false)) (embeddings . ,(if embeddings t :json-false))
+            (what . "database scan (and embeddings if asked) runs when Emacs is idle; pass wait=true to block"))))))))
 
 (defun orsb-tool-get-schema (_args)
   "get_schema: the vocabulary this server enforces."

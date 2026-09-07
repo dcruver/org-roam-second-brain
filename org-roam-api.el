@@ -138,7 +138,7 @@ PROPERTIES is an alist of #+KEYWORD: value pairs added to the file header."
         (insert (format "#+%s: %s\n" (car prop) (cdr prop))))
       (save-buffer)
       (kill-buffer (current-buffer)))
-    (org-roam-db-sync)
+    (orsb-core-db-refresh file-path)
     (json-encode
      `((success . t)
        (note_id . ,id)
@@ -794,7 +794,7 @@ NOTES is optional additional notes."
       (save-buffer)
       (kill-buffer (current-buffer)))
 
-    (org-roam-db-sync)
+    (orsb-core-db-refresh file-path)
 
     ;; Generate embeddings if available
     (my/api--generate-and-save-embedding file-path)
@@ -845,7 +845,7 @@ NOTES is optional additional notes."
       (save-buffer)
       (kill-buffer (current-buffer)))
 
-    (org-roam-db-sync)
+    (orsb-core-db-refresh file-path)
 
     ;; Generate embeddings if available
     (my/api--generate-and-save-embedding file-path)
@@ -891,7 +891,7 @@ ELABORATION is optional detailed explanation."
       (save-buffer)
       (kill-buffer (current-buffer)))
 
-    (org-roam-db-sync)
+    (orsb-core-db-refresh file-path)
 
     ;; Generate embeddings if available
     (my/api--generate-and-save-embedding file-path)
@@ -936,7 +936,7 @@ NOTES is optional additional notes."
       (save-buffer)
       (kill-buffer (current-buffer)))
 
-    (org-roam-db-sync)
+    (orsb-core-db-refresh file-path)
 
     ;; Generate embeddings if available
     (my/api--generate-and-save-embedding file-path)
@@ -1289,7 +1289,7 @@ Returns the node ID if created, nil if already exists."
       (with-temp-file filepath
         (insert (format ":PROPERTIES:\n:ID: %s\n:NODE-TYPE: person\n:END:\n#+title: %s\n"
                        id name)))
-      (org-roam-db-sync)
+      (orsb-core-db-refresh filepath)
       ;; Generate embeddings if org-roam-semantic is available
       (my/api--generate-and-save-embedding filepath)
       id)))
@@ -1651,12 +1651,12 @@ If ARCHIVE is non-nil, move to archive directory instead of deleting."
                   (unless (file-exists-p archive-dir)
                     (make-directory archive-dir t))
                   (rename-file file (expand-file-name (file-name-nondirectory file) archive-dir))
-                  (org-roam-db-sync)
+                  (orsb-core-db-refresh file (expand-file-name (file-name-nondirectory file) archive-dir))
                   (json-encode (list (cons (quote success) t)
                                     (cons (quote action) "archived")
                                     (cons (quote file) file))))
               (delete-file file)
-              (org-roam-db-sync)
+              (orsb-core-db-refresh file)
               (json-encode (list (cons (quote success) t)
                                 (cons (quote action) "deleted")
                                 (cons (quote file) file)))))))
@@ -1698,7 +1698,7 @@ NEW-TITLE is the new title for the note."
                  (new-path (expand-file-name new-filename (file-name-directory file))))
             (unless (string= file new-path)
               (rename-file file new-path)
-              (org-roam-db-sync))
+              (orsb-core-db-refresh file new-path))
             (json-encode (list (cons (quote success) t)
                               (cons (quote old_file) file)
                               (cons (quote new_file) new-path)
@@ -1747,7 +1747,7 @@ TAG is the tag to add or remove (without colons)."
                   (replace-match (format "#+filetags: %s" 
                                         (replace-regexp-in-string (format ":%s:" tag) ":" filetags-line))))))
               (my/api--save-buffer-no-hooks)
-              (org-roam-db-sync)
+              (orsb-core-db-refresh file)
               (json-encode (list (cons (quote success) t)
                                 (cons (quote action) action)
                                 (cons (quote tag) tag)
@@ -1871,7 +1871,7 @@ LEVEL defaults to 1."
                 (insert text)
                 (unless (string-suffix-p "\n" text) (insert "\n")))
               (my/api--save-buffer-no-hooks))
-            (org-roam-db-sync)
+            (orsb-core-db-refresh file)
             (json-encode
              `((success . t)
                (node_id . ,new-id)
@@ -1933,7 +1933,7 @@ Cannot delete file-level nodes; use delete_note instead."
                     (end (save-excursion (org-end-of-subtree t t) (point))))
                 (delete-region beg end))
               (my/api--save-buffer-no-hooks))
-            (org-roam-db-sync)
+            (orsb-core-db-refresh file)
             (json-encode
              `((success . t)
                (node_id . ,node-id)
@@ -1971,7 +1971,7 @@ SECTION is optional heading to add link under."
               (goto-char (point-max))
               (insert (format "\n- [[id:%s][%s]]" to-id to-title)))
             (my/api--save-buffer-no-hooks)
-            (org-roam-db-sync)
+            (orsb-core-db-refresh from-file)
             (json-encode (list (cons (quote success) t)
                               (cons (quote from) from-id)
                               (cons (quote to) to-id)

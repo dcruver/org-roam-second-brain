@@ -206,7 +206,8 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (orsb-tools-test--data "log_to_inbox" 'text "file this" 'linked_id "1784854105")
       (should (string-match-p "file this" (alist-get 'content (orsb-tools-test--data "get_daily")))))
     (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'id "1784854105")) "projects/project-backlog-1784854105.org"))
-    (should (equal (alist-get 'synced (orsb-tools-test--data "sync")) "db"))))
+    (should (eq (alist-get 'queued (orsb-tools-test--data "sync")) t))
+    (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'wait t 'full t)) "db"))))
 
 ;;;; missing args: JSON-RPC -32602 before dispatch
 
