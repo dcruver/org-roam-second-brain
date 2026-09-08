@@ -782,17 +782,23 @@ rebuild (the only remedy when the db and the files disagree)."
   (seq-some (lambda (k) (orsb-arg args k)) keys))
 
 (defun orsb-legacy--search (mode)
-  "Mapper for the old search tools in MODE."
+  "Mapper for the old search tools in MODE.
+The old semantic_search returned each note's full text; callers that fed
+that to an LLM (blog_draft) get a cleaned `excerpt' of up to 1500
+characters instead of the 240-character snippet."
   (lambda (args)
     (let ((d (orsb-legacy--data "search" (append `((mode . ,mode)) args))))
       (orsb-legacy--ok
        `((query . ,(alist-get 'query d)) (total_found . ,(alist-get 'total d))
          (notes . ,(orsb--vector
-                    (mapcar (lambda (h) `((id . ,(alist-get 'id h)) (title . ,(alist-get 'title h))
-                                          (file . ,(alist-get 'file h)) (node_type . ,(alist-get 'node_type h))
-                                          (status . ,(alist-get 'status h))
-                                          (similarity_score . ,(alist-get 'score h))
-                                          (snippet . ,(alist-get 'snippet h))))
+                    (mapcar (lambda (h)
+                              (let ((node (ignore-errors (org-roam-node-from-id (alist-get 'id h)))))
+                                `((id . ,(alist-get 'id h)) (title . ,(alist-get 'title h))
+                                  (file . ,(alist-get 'file h)) (node_type . ,(alist-get 'node_type h))
+                                  (status . ,(alist-get 'status h))
+                                  (similarity_score . ,(alist-get 'score h))
+                                  (snippet . ,(alist-get 'snippet h))
+                                  (excerpt . ,(if node (orsb-tools--snippet node 1500) (alist-get 'snippet h))))))
                             (alist-get 'hits d)))))))))
 
 (defun orsb-legacy--create (type)
