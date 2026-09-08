@@ -41,7 +41,7 @@ straight.el:
 (orsb-mode 1)
 ```
 
-Requires Emacs 28.1+ and org-roam 2.2+.
+Requires Emacs 29.1+ (builtin SQLite) and org-roam 2.2+.
 
 ## Configure
 
@@ -128,5 +128,5 @@ make lint     # warnings are errors for the orsb-* modules
 make reload   # reload into a running Emacs server and restart the MCP server
 ```
 
-CI runs the same on Emacs 28, 29 and 30. See `SETUP.md` for a full
+CI runs the same on Emacs 29 and 30. See `SETUP.md` for a full
 walkthrough and `MIGRATION.md` for the 1.x → 2.0 tool mapping.

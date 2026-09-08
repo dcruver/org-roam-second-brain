@@ -2,7 +2,7 @@
 
 ;; Author: Don Cruver
 ;; Version: 2.0.0
-;; Package-Requires: ((emacs "28.1") (org-roam "2.2"))
+;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
 

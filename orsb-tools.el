@@ -2,7 +2,7 @@
 
 ;; Author: Don Cruver
 ;; Version: 2.0.0
-;; Package-Requires: ((emacs "28.1") (org-roam "2.2"))
+;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
 
@@ -276,8 +276,7 @@ JSON null and false both count as absent for scalars."
                                  (with-temp-buffer (insert-file-contents file) (downcase (buffer-string)))
                                (error nil)))
                        (score (seq-count (lambda (w) (string-search w text)) words))
-                       (_ (> score 0))
-                       (n (orsb-core--first-node-in-file file)))
+                       (n (and (> score 0) (orsb-core--first-node-in-file file))))
              (push (cons n (/ (float score) (length words))) hits)))))
       ("semantic"
        (unless (fboundp 'orsb-search-similar)

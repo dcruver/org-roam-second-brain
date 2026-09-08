@@ -2,7 +2,7 @@
 
 ## 1. Emacs and org-roam
 
-Emacs 28.1 or newer with org-roam 2.2+. Set `org-roam-directory` and run
+Emacs 29.1 or newer (for the builtin SQLite org-roam uses) with org-roam 2.2+. Set `org-roam-directory` and run
 `M-x org-roam-db-sync` once so the database matches the vault.
 
 ## 2. Install the package
