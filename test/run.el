@@ -12,6 +12,8 @@
 
 ;;; Code:
 
+(require 'subr-x)   ; string-empty-p is not preloaded on Emacs 28
+
 (let* ((here (file-name-directory (or load-file-name buffer-file-name)))
        (root (expand-file-name ".." here))
        (deps (getenv "ORSB_DEPS")))

@@ -15,7 +15,7 @@ test:
 # migrated onto orsb-core (see docs: Phase 5 of the 2.0 plan).
 STRICT := orsb-core.el orsb-search.el orsb-tools.el
 
-LOADPATH := --eval '(dolist (dir (split-string (or (getenv "ORSB_DEPS") "") ":" t)) (dolist (sub (directory-files (expand-file-name dir) t "\\`[^.]")) (when (and (file-directory-p sub) (not (string-match-p "org-roam-second-brain" sub))) (add-to-list (quote load-path) sub t))))' --eval '(require (quote org-roam))'
+LOADPATH := --eval '(dolist (dir (split-string (or (getenv "ORSB_DEPS") "") ":" t)) (dolist (sub (directory-files (expand-file-name dir) t "\\`[^.]")) (when (and (file-directory-p sub) (not (string-match-p "org-roam-second-brain" sub))) (add-to-list (quote load-path) sub t))))' --eval '(unless (locate-library "org-roam") (require (quote package)) (package-initialize))' --eval '(require (quote org-roam))'
 
 # Byte-compile every source (warnings shown, not fatal), same load-path rules
 # as the tests: working copy first, then ORSB_DEPS.

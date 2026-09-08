@@ -92,7 +92,7 @@ Use `orsb-core-set-todo' on the heading node instead."
   (declare (obsolete orsb-core-set-todo "2.0"))
   (let ((node (seq-find (lambda (n) (and (equal (org-roam-node-file n) (file-truename (expand-file-name file org-roam-directory)))
                                          (> (org-roam-node-level n) 0)
-                                         (string-equal-ignore-case (org-roam-node-title n) heading)))
+                                         (orsb-core-string= (org-roam-node-title n) heading)))
                         (org-roam-node-list))))
     (unless node (error "Could not find task: %s" heading))
     (orsb-core-set-todo node new-state)

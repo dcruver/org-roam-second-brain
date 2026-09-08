@@ -53,6 +53,12 @@ an underscore, so \"EMBEDDING\" hides EMBEDDING, EMBEDDING_HASH, ..."
   :type '(repeat string)
   :group 'orsb)
 
+;;;; Compatibility
+
+(defun orsb-core-string= (a b)
+  "Case-insensitive string equality (Emacs 28 lacks `string-equal-ignore-case')."
+  (eq t (compare-strings a nil nil b nil nil t)))
+
 ;;;; Resolving
 
 (defun orsb-core--file-node (file)
@@ -327,7 +333,7 @@ ignored).  Signals `not-found' when there is no such heading."
                  (save-excursion (org-end-of-subtree t t) (point))))
           (found nil))
       (while (and (not found) (re-search-forward org-heading-regexp end t))
-        (when (string-equal-ignore-case (string-trim (org-get-heading t t t t)) (string-trim section))
+        (when (orsb-core-string= (string-trim (org-get-heading t t t t)) (string-trim section))
           (setq found (point))))
       (unless found
         (orsb-error 'not-found "No heading %S under %s" section (org-roam-node-title node)))
@@ -592,7 +598,7 @@ when found or created."
   (goto-char (point-min))
   (let ((found nil))
     (while (and (not found) (re-search-forward org-heading-regexp nil t))
-      (when (string-equal-ignore-case (string-trim (org-get-heading t t t t)) (string-trim section))
+      (when (orsb-core-string= (string-trim (org-get-heading t t t t)) (string-trim section))
         (setq found (line-beginning-position))))
     (cond
      (found (goto-char found) t)

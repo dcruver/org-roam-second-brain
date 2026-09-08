@@ -899,7 +899,7 @@ rebuild (the only remedy when the db and the files disagree)."
                (heading (orsb-arg args 'heading))
                (node (or (seq-find (lambda (n) (and (equal (org-roam-node-file n) (expand-file-name file org-roam-directory))
                                                     (> (org-roam-node-level n) 0)
-                                                    (string-equal-ignore-case (org-roam-node-title n) heading)))
+                                                    (orsb-core-string= (org-roam-node-title n) heading)))
                                    (org-roam-node-list))
                          (orsb-error 'not-found "No heading %S in %s" heading file)))
                (d (orsb-legacy--data "set_node" `((id . ,(org-roam-node-id node)) (todo . ,(orsb-arg args 'new_state))))))
