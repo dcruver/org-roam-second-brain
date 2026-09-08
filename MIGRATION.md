@@ -1,5 +1,13 @@
 # Migrating to the 2.0 MCP contract
 
+Since 2.0.0 the old names are thin argument mappers over the new tools (the
+`my/api-*` implementation and `org-roam-api.el` are gone), so both spellings
+always behave the same. Also gone: `deploy.sh` (see SETUP.md §7), the global
+key bindings claimed at load time (enable `orsb-mode`), and the synchronous
+embedding on every save (now queued for idle time). Elisp entry points kept
+as aliases: `sb/*` commands and `sb/hugo-*` variables, `org-roam-mcp-http-start`
+/ `-stop` (also `orsb-mcp-start` / `orsb-mcp-stop`), `my/org-roam-change-task-state`.
+
 Version 2.0 replaces the 35 tools that grew up one at a time with 18 orthogonal
 ones. Every tool takes the same `id` parameter (an org-roam id, a path relative
 to the vault or absolute, or an exact title/alias), returns the same envelope,

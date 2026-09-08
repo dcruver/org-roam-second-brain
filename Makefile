@@ -4,7 +4,7 @@ EMACS ?= emacs
 ORSB_DEPS ?= $(firstword $(wildcard $(HOME)/.config/emacs/.local/straight/build-*/))
 export ORSB_DEPS
 
-SOURCES := orsb-core.el orsb-search.el orsb-tools.el org-roam-api.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el
+SOURCES := orsb-core.el orsb-search.el orsb-tools.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el org-agenda-project-tracking.el
 
 .PHONY: test lint compile clean reload
 

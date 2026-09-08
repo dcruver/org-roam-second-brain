@@ -2,7 +2,7 @@
 
 ;; Author: David Cruver <dcruver@users.noreply.github.com>
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 1.4.0
+;; Version: 2.0.0
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.2"))
 
 ;;; Commentary:
@@ -949,19 +949,12 @@ wrap contents under a synthetic top-level heading using #+title or filename."
     ;; Always use chunking for optimal semantic search
     (org-roam-semantic-generate-chunks-for-file (buffer-file-name))))
 
-;; Add the hook
-(add-hook 'before-save-hook 'org-roam-semantic--update-on-save)
+;; Embedding on save is handled by orsb-search (after-save, queued for idle
+;; time); the synchronous before-save hook is no longer installed.
 
 ;;; Key Bindings for Vector Search
-
-(global-set-key (kbd "C-c v s") 'org-roam-semantic-search)
-(global-set-key (kbd "C-c v i") 'org-roam-semantic-insert-similar)
-(global-set-key (kbd "C-c v r") 'org-roam-semantic-insert-related)
-
-;; Chunk-level search bindings
-(global-set-key (kbd "C-c v c") 'org-roam-semantic-search-chunks)
-(global-set-key (kbd "C-c v g") 'org-roam-semantic-generate-chunks-for-file)
-(global-set-key (kbd "C-c v G") 'org-roam-semantic-generate-all-chunks)
+;; The C-c v bindings are installed by `orsb-mode' (org-roam-second-brain.el),
+;; not at load time.
 
 (provide 'org-roam-vector-search)
 

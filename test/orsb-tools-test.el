@@ -33,7 +33,8 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
   "Call NAME and return its data, failing the test on an error envelope."
   (let* ((r (apply #'orsb-tools-test--call name args))
          (env (cdr r)))
-    (should (eq (alist-get 'ok env) t))
+    (unless (eq (alist-get 'ok env) t)
+      (ert-fail (format "%s %S -> %S" name args env)))
     (alist-get 'data env)))
 
 (defun orsb-tools-test--error (name &rest args)
@@ -216,6 +217,45 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (orsb-tools-test--ensure-registered)
     (let ((rpc (orsb-test--json (org-roam-mcp-http--handle-tools-call '((name . "get_node") (arguments . ()))))))
       (should (= (alist-get 'code (alist-get 'error rpc)) -32602)))))
+
+;;;; legacy names: argument mappers, old response shape
+
+(ert-deftest orsb-tools-legacy-names-map-onto-the-contract ()
+  (orsb-test-with-vault
+    (orsb-tools-test--ensure-registered)
+    (cl-flet ((legacy (name &rest args)
+                (let* ((arguments (let (out) (while args (push (cons (pop args) (pop args)) out)) (nreverse out)))
+                       (raw (org-roam-mcp-http--handle-tools-call `((name . ,name) (arguments . ,arguments))))
+                       (rpc (orsb-test--json raw)))
+                  (cons rpc (orsb-test--json (alist-get 'text (car (alist-get 'content (alist-get 'result rpc)))))))))
+      ;; read_note: old keys, content = body
+      (let ((r (cdr (legacy "read_note" 'identifier "Project Backlog"))))
+        (should (eq (alist-get 'success r) t))
+        (should (string-match-p "Next Actions" (alist-get 'content r))))
+      ;; get_note_properties: status from the drawer, links as id lists
+      (let ((r (cdr (legacy "get_note_properties" 'identifier "1784854105"))))
+        (should (equal (alist-get 'status r) "active"))
+        (should (equal (alist-get 'node_type r) "project")))
+      ;; update_node with properties writes the file-level drawer (the 1.x bug)
+      (let ((r (cdr (legacy "update_node" 'node_id "1784854105" 'properties '((STATUS . "done"))))))
+        (should (eq (alist-get 'success r) t))
+        (should (equal (alist-get 'STATUS (alist-get 'properties r)) "done")))
+      ;; update_note appends under a section
+      (should (eq (alist-get 'success (cdr (legacy "update_note" 'identifier "1784854105" 'content "- [ ] via legacy" 'section "Next Actions"))) t))
+      (should (string-match-p "via legacy" (orsb-test--file "projects/project-backlog-1784854105.org")))
+      ;; create_project returns the old note object
+      (let ((r (cdr (legacy "create_project" 'title "Legacy Project" 'notes "hello" 'next_action "do it"))))
+        (should (eq (alist-get 'success r) t))
+        (should (alist-get 'note_id r))
+        (should (equal (alist-get 'status (alist-get 'node r)) "active")))
+      ;; failures keep the {"success":false,"error"} shape and no isError flag
+      (let ((r (legacy "read_note" 'identifier "nope")))
+        (should (eq (alist-get 'success (cdr r)) :json-false))
+        (should (string-match-p "nope" (alist-get 'error (cdr r))))
+        (should-not (alist-get 'isError (alist-get 'result (car r)))))
+      ;; deprecated marker in the listing
+      (should (string-prefix-p "[deprecated → get_node]"
+                               (org-roam-mcp-tool-description (gethash "read_note" org-roam-mcp-http--tools)))))))
 
 ;;;; status migration
 

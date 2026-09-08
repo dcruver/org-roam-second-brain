@@ -2,7 +2,7 @@
 
 ;; Author: David Cruver <dcruver@users.noreply.github.com>
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 1.0.0
+;; Version: 2.0.0
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.2"))
 
 ;;; Commentary:
@@ -16,12 +16,12 @@
 ;; and core functions that can be wrapped by API layers.
 ;;
 ;; Also includes org-roam-api.el for MCP server integration.
-;; Load it with: (require 'org-roam-api)
 
 ;;; Code:
 
 (require 'org-roam)
 (require 'org-roam-vector-search)
+(require 'orsb-core)
 (require 'json)
 (require 'subr-x)
 (require 'cl-lib)
@@ -80,19 +80,12 @@ Alist mapping node type symbols to subdirectory names under `org-roam-directory'
   :type 'string
   :group 'sb)
 
-(defcustom sb/hugo-base-dir "~/Projects/cruver.network/blog/"
-  "Path to Hugo site root directory.
-Used by blog publishing functions to locate content directory."
-  :type 'directory
-  :group 'sb)
+;; The Hugo settings live in orsb-core (`orsb-hugo-base-dir', nil by default so
+;; a fresh install refuses blog creation until it is configured, and
+;; `orsb-hugo-sections'); the sb/ names remain as aliases.
+(defvaralias 'sb/hugo-base-dir 'orsb-hugo-base-dir)
 
-(defcustom sb/hugo-sections
-  '("signalscope" "health-tracking" "homelab" "gpu-ai"
-    "second-brain" "cyberdeck" "side-projects" "writing")
-  "Valid Hugo sections for blog posts.
-Each section corresponds to a project area in the Hugo site."
-  :type '(repeat string)
-  :group 'sb)
+(defvaralias 'sb/hugo-sections 'orsb-hugo-sections)
 
 (defcustom sb/blog-llm-function nil
   "Function to call for LLM operations in blog writing.
@@ -598,45 +591,17 @@ Returns plist with :concepts and :dailies lists, each containing
 "))
 
 (defun sb/core-create-blog (title section &optional slug)
-  "Create a blog post node with TITLE for SECTION.
+  "Create a blog post node with TITLE for SECTION (via `orsb-core-create-node').
 SLUG is optional; if nil, generated from title.
-Returns plist with :id, :file, :title, :section."
-  (let* ((slug (or slug (downcase (replace-regexp-in-string "[^a-zA-Z0-9]+" "-" title))))
-         (filepath (sb/--create-filepath title 'blog))
-         (id (org-id-new))
-         (date (format-time-string "[%Y-%m-%d %a]"))
-         (hugo-section (format "%s/posts" section)))
-
-    (with-current-buffer (find-file-noselect filepath)
-      (org-mode)
-      (erase-buffer)
-      ;; Properties drawer
-      (insert ":PROPERTIES:\n")
-      (insert (format ":ID: %s\n" id))
-      (insert ":NODE-TYPE: blog\n")
-      (insert (format ":EXPORT_FILE_NAME: %s\n" slug))
-      (insert (format ":EXPORT_HUGO_SECTION: %s\n" hugo-section))
-      (insert ":END:\n")
-      (insert (format "#+title: %s\n" title))
-      (insert (format "#+date: %s\n" date))
-      (insert (format "#+hugo_base_dir: %s\n" sb/hugo-base-dir))
-      (insert "#+hugo_draft: true\n")
-      (insert "#+hugo_tags: \n")
-      (insert (format "#+hugo_categories: %s\n\n"
-                      (capitalize (replace-regexp-in-string "-" " " section))))
-      ;; Content template
-      (insert (sb/--blog-template title section))
-      (save-buffer)
-      (kill-buffer (current-buffer)))
-
-    ;; Sync database
-    (org-roam-db-sync)
-
-    ;; Generate embeddings
-    (sb/--generate-embedding filepath)
-
-    ;; Return result
-    (list :id id :file filepath :title title :section section :slug slug)))
+Returns plist with :id, :file, :title, :section, :slug."
+  (let* ((node (orsb-core-create-node "blog" title
+                                      :hugo-section section
+                                      :body (sb/--blog-template title section)))
+         (slug (or slug (orsb-core--slug title))))
+    (when (and slug (not (equal slug (orsb-core--slug title))))
+      (orsb-core-set-properties node `(("EXPORT_FILE_NAME" . ,slug))))
+    (list :id (org-roam-node-id node) :file (org-roam-node-file node)
+          :title title :section section :slug slug)))
 
 (defun sb/core-blog-posts (&optional draft-filter)
   "Get all blog posts, optionally filtered by draft status.
@@ -1955,7 +1920,26 @@ With prefix arg, prompts for similarity THRESHOLD."
     map)
   "Keymap for Second Brain commands.")
 
-(global-set-key (kbd "C-c b") sb/command-map)
+(defvar orsb-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c b") sb/command-map)
+    (define-key map (kbd "C-c v s") 'org-roam-semantic-search)
+    (define-key map (kbd "C-c v i") 'org-roam-semantic-insert-similar)
+    (define-key map (kbd "C-c v r") 'org-roam-semantic-insert-related)
+    (define-key map (kbd "C-c v c") 'org-roam-semantic-search-chunks)
+    (define-key map (kbd "C-c v g") 'org-roam-semantic-generate-chunks-for-file)
+    (define-key map (kbd "C-c v G") 'org-roam-semantic-generate-all-chunks)
+    map)
+  "Keymap of `orsb-mode': C-c b (second brain) and C-c v (semantic search).")
+
+;;;###autoload
+(define-minor-mode orsb-mode
+  "Global keybindings for org-roam-second-brain (C-c b and C-c v).
+Nothing is bound until this mode is enabled, so the package no longer
+claims global keys at load time."
+  :global t
+  :keymap orsb-mode-map
+  :group 'orsb)
 
 (provide 'org-roam-second-brain)
 ;;; org-roam-second-brain.el ends here

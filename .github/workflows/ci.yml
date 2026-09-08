@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['28.2', '29.4', '30.1']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      - name: Install org-roam from MELPA
+        run: |
+          emacs -Q --batch \
+            --eval '(require (quote package))' \
+            --eval '(add-to-list (quote package-archives) (cons "melpa" "https://melpa.org/packages/") t)' \
+            --eval '(package-initialize)' \
+            --eval '(package-refresh-contents)' \
+            --eval '(package-install (quote org-roam))'
+      - name: Tests
+        run: make test ORSB_DEPS=""
+      - name: Byte-compile (warnings shown)
+        run: make compile ORSB_DEPS=""
+      - name: Lint (warnings are errors for the orsb-* modules)
+        run: make lint ORSB_DEPS=""

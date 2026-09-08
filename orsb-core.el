@@ -298,12 +298,22 @@ For a file node the body starts after the file-level drawer and the
           (progn (goto-char (car b))
                  (insert text)
                  (unless (string-suffix-p "\n" text) (insert "\n")))
-        (goto-char (cdr b))
-        (unless (or (bobp) (eq (char-before) ?\n)) (insert "\n"))
-        (insert text)
-        (unless (string-suffix-p "\n" text) (insert "\n")))))
+        (orsb-core--insert-at-body-end b text))))
   (orsb-core--after-write (org-roam-node-file node))
   t)
+
+(defun orsb-core--insert-at-body-end (bounds text)
+  "Insert TEXT after the last non-blank line of the body BOUNDS.
+Blank lines that separated the body from the next heading stay after it."
+  (goto-char (cdr bounds))
+  (skip-chars-backward " \t\n" (car bounds))
+  (if (= (point) (car bounds))
+      (goto-char (car bounds))
+    (end-of-line)
+    ;; reuse the newline that ended the last line instead of adding one
+    (if (eq (char-after) ?\n) (forward-char 1) (insert "\n")))
+  (insert text)
+  (unless (string-suffix-p "\n" text) (insert "\n")))
 
 (defun orsb-core-section-body (node section)
   "Return the body of the heading titled SECTION inside NODE's subtree/file.
@@ -408,6 +418,483 @@ With INCLUDE-BODY, include the body text."
        (modified . ,(when mtime (format-time-string "%Y-%m-%dT%H:%M:%S%z" mtime))))
      (when include-body
        `((body . ,(orsb-core-node-body node)))))))
+
+;;;; Vault layout
+
+(defcustom orsb-directories
+  '(("project" . "projects") ("person" . "people") ("idea" . "ideas")
+    ("admin" . "admin") ("blog" . "blog") ("reference" . "reference")
+    ("howto" . "howto") ("note" . ""))
+  "Node types and the vault subdirectory each is created in (\"\" = root)."
+  :type '(alist :key-type string :value-type string)
+  :group 'orsb)
+
+(defcustom orsb-daily-directory "daily"
+  "Vault subdirectory of the daily notes (one YYYY-MM-DD.org per day)."
+  :type 'string
+  :group 'orsb)
+
+(defcustom orsb-archive-directory "archive"
+  "Vault subdirectory archived notes are moved to."
+  :type 'string
+  :group 'orsb)
+
+(defcustom orsb-inbox-heading "Inbox"
+  "Heading in the daily note that collects inbox entries."
+  :type 'string
+  :group 'orsb)
+
+(defcustom orsb-hugo-base-dir nil
+  "Root of the Hugo site blog nodes export to (nil: blog creation is refused)."
+  :type '(choice (const nil) directory)
+  :group 'orsb)
+
+(defcustom orsb-hugo-sections nil
+  "Hugo sections offered for blog nodes (nil: any)."
+  :type '(repeat string)
+  :group 'orsb)
+
+(defun orsb-core--vault-file (relative)
+  "RELATIVE resolved under `org-roam-directory'."
+  (expand-file-name relative org-roam-directory))
+
+(defun orsb-core--slug (title)
+  "A filename-safe slug of TITLE."
+  (let ((s (downcase (replace-regexp-in-string "[^[:alnum:]]+" "-" title))))
+    (string-trim s "-+" "-+")))
+
+(defun orsb-core--new-file-path (title type)
+  "Path for a new TYPE note titled TITLE (directory created as needed)."
+  (let* ((dir (cdr (assoc type orsb-directories)))
+         (dir (if (and dir (not (string-empty-p dir))) (orsb-core--vault-file dir) org-roam-directory))
+         (stamp (format-time-string "%Y%m%d%H%M%S"))
+         (path (expand-file-name (format "%s-%s.org" (orsb-core--slug title) stamp) dir)))
+    (make-directory dir t)
+    (while (file-exists-p path)
+      (setq path (expand-file-name (format "%s-%s-%d.org" (orsb-core--slug title) stamp (random 1000)) dir)))
+    path))
+
+(defun orsb-core--write-new-file (path drawer keywords body)
+  "Create PATH with DRAWER (alist), KEYWORDS (alist) and BODY text.
+Returns the file-level node."
+  (with-temp-file path
+    (insert ":PROPERTIES:\n")
+    (dolist (cell drawer)
+      (when (cdr cell) (insert (format ":%s: %s\n" (car cell) (cdr cell)))))
+    (insert ":END:\n")
+    (dolist (cell keywords)
+      (when (cdr cell) (insert (format "#+%s: %s\n" (car cell) (cdr cell)))))
+    (insert "\n")
+    (when body (insert body) (unless (string-suffix-p "\n" body) (insert "\n"))))
+  (org-roam-db-update-file path)
+  (when (fboundp 'orsb-search-enqueue) (orsb-search-enqueue path))
+  (or (orsb-core--file-node path)
+      (orsb-error 'internal "Created %s but org-roam did not index it" path)))
+
+;;;; Creation
+
+(defun orsb-core-create-node (type title &rest args)
+  "Create a TYPE note titled TITLE and return its node.
+ARGS is a plist: :body, :status, :next-action, :context, :follow-ups (list),
+:one-liner, :due-date, :hugo-section, :tags (list), :properties (alist).
+Each type gets its conventional drawer keys and skeleton headings."
+  (unless (assoc type orsb-directories)
+    (orsb-error 'invalid-argument "node_type must be one of %s"
+                (string-join (mapcar #'car orsb-directories) ", ")))
+  (unless (and (stringp title) (not (string-blank-p title)))
+    (orsb-error 'invalid-argument "title must be a non-empty string"))
+  (let* ((id (org-id-new))
+         (body (plist-get args :body))
+         (status (plist-get args :status))
+         (tags (plist-get args :tags))
+         (path (orsb-core--new-file-path title type))
+         (drawer `(("ID" . ,id) ("NODE-TYPE" . ,type)))
+         (keywords `(("title" . ,title)
+                     ("filetags" . ,(and tags (concat ":" (string-join tags ":") ":")))))
+         (text nil))
+    (pcase type
+      ("project"
+       (setq drawer (append drawer `(("STATUS" . ,(or status "active"))
+                                     ("NEXT-ACTION" . ,(plist-get args :next-action)))))
+       (setq text (concat "* Next Actions\n"
+                          (if (plist-get args :next-action) (format "- [ ] %s\n" (plist-get args :next-action)) "")
+                          "\n* Notes\n" (or body ""))))
+      ("person"
+       (setq drawer (append drawer `(("CONTEXT" . ,(plist-get args :context))
+                                     ("LAST-CONTACT" . ,(format-time-string "[%Y-%m-%d %a]")))))
+       (setq text (concat "* Follow-ups\n"
+                          (mapconcat (lambda (f) (format "- [ ] %s\n" f)) (plist-get args :follow-ups) "")
+                          "\n* Notes\n" (or body ""))))
+      ("idea"
+       (let ((one (or (plist-get args :one-liner)
+                      (and body (car (split-string body "\n" t)))
+                      title)))
+         (setq drawer (append drawer `(("ONE-LINER" . ,one) ("STATUS" . ,status))))
+         (setq text (concat "* One-liner\n" one "\n\n* Elaboration\n" (or body "")))))
+      ("admin"
+       (setq drawer (append drawer `(("DUE-DATE" . ,(and (plist-get args :due-date) (format "[%s]" (plist-get args :due-date))))
+                                     ("STATUS" . ,(or status "active")))))
+       (setq text (concat "* Notes\n" (or body ""))))
+      ("blog"
+       (unless orsb-hugo-base-dir
+         (orsb-error 'refused "Blog notes need `orsb-hugo-base-dir' to be set on the server"))
+       (let* ((section (or (plist-get args :hugo-section) (car orsb-hugo-sections) "posts"))
+              (slug (orsb-core--slug title)))
+         (when (and orsb-hugo-sections (not (member section orsb-hugo-sections)))
+           (orsb-error 'invalid-argument "hugo_section must be one of %s" (string-join orsb-hugo-sections ", ")))
+         (setq drawer (append drawer `(("STATUS" . ,(or status "draft"))
+                                       ("EXPORT_FILE_NAME" . ,slug)
+                                       ("EXPORT_HUGO_SECTION" . ,(format "%s/posts" section)))))
+         (setq keywords (append keywords
+                                `(("date" . ,(format-time-string "[%Y-%m-%d %a]"))
+                                  ("hugo_base_dir" . ,orsb-hugo-base-dir)
+                                  ("hugo_draft" . "true")
+                                  ("hugo_tags" . ,(and tags (string-join tags " ")))
+                                  ("hugo_categories" . ,(capitalize (replace-regexp-in-string "-" " " section))))))
+         (setq text (concat "* Draft\n\n" (or body "")))))
+      (_ (setq drawer (append drawer `(("STATUS" . ,status))))
+         (setq text body)))
+    (let ((node (orsb-core--write-new-file path drawer keywords text)))
+      (when-let ((props (plist-get args :properties)))
+        (orsb-core-set-properties node props))
+      (orsb-core-resolve id))))
+
+(defun orsb-core-add-heading (node heading &optional body properties level)
+  "Append HEADING (with a fresh :ID:) to NODE's file and return the new node.
+BODY and PROPERTIES (alist) are optional; LEVEL defaults to 1."
+  (unless (and (stringp heading) (not (string-blank-p heading)))
+    (orsb-error 'invalid-argument "heading must be a non-empty string"))
+  (let ((id (org-id-new))
+        (file (org-roam-node-file node)))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (point-max))
+       (unless (bolp) (insert "\n"))
+       (insert (make-string (or level 1) ?*) " " heading "\n:PROPERTIES:\n:ID: " id "\n")
+       (dolist (cell properties)
+         (insert (format ":%s: %s\n" (orsb-core--normalize-key (car cell)) (cdr cell))))
+       (insert ":END:\n")
+       (when (and body (not (string-blank-p body)))
+         (insert body)
+         (unless (string-suffix-p "\n" body) (insert "\n")))))
+    (orsb-core--after-write file)
+    (orsb-core-resolve id)))
+
+;;;; Section and file edits
+
+(defun orsb-core--goto-section (section &optional create)
+  "Move point to the heading titled SECTION in the current buffer.
+With CREATE, append a level-1 heading when it is missing.  Return non-nil
+when found or created."
+  (goto-char (point-min))
+  (let ((found nil))
+    (while (and (not found) (re-search-forward org-heading-regexp nil t))
+      (when (string-equal-ignore-case (string-trim (org-get-heading t t t t)) (string-trim section))
+        (setq found (line-beginning-position))))
+    (cond
+     (found (goto-char found) t)
+     (create (goto-char (point-max))
+             (unless (bolp) (insert "\n"))
+             (insert "* " section "\n")
+             (forward-line -1)
+             t)
+     (t nil))))
+
+(defun orsb-core-update-section (node section content &optional mode)
+  "Edit the body of heading SECTION in NODE's file with CONTENT.
+MODE is \"append\" (default), \"prepend\" or \"replace\".  The heading is
+created when missing."
+  (let ((mode (or mode "append")))
+    (unless (member mode '("append" "prepend" "replace"))
+      (orsb-error 'invalid-argument "mode must be append, prepend or replace"))
+    (with-current-buffer (find-file-noselect (org-roam-node-file node))
+      (org-with-wide-buffer
+       (orsb-core--goto-section section t)
+       (let ((b (orsb-core--body-bounds)))
+         (pcase mode
+           ("replace" (delete-region (car b) (cdr b))
+                      (goto-char (car b))
+                      (insert content)
+                      (unless (string-suffix-p "\n" content) (insert "\n")))
+           ("prepend" (goto-char (car b))
+                      (insert content)
+                      (unless (string-suffix-p "\n" content) (insert "\n")))
+           (_ (orsb-core--insert-at-body-end b content))))))
+    (orsb-core--after-write (org-roam-node-file node))
+    t))
+
+(defun orsb-core--top-level-headings (text)
+  "Titles of the level-1 headings in TEXT."
+  (let (out (pos 0))
+    (while (string-match "^\\* +\\(.*?\\)[ \t]*$" text pos)
+      (push (match-string 1 text) out)
+      (setq pos (match-end 0)))
+    (nreverse out)))
+
+(defun orsb-core-replace-file-body (node content &optional force)
+  "Replace everything after NODE's drawer and keywords with CONTENT.
+Refused (`refused') when CONTENT would drop a level-1 heading or shrink a
+note of more than 200 characters below half its size, unless FORCE.  A
+timestamped .bak sibling is written first."
+  (let ((file (org-roam-node-file node)))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (let* ((b (orsb-core--body-bounds))
+              (old (buffer-substring-no-properties (car b) (cdr b)))
+              (dropped (seq-difference (orsb-core--top-level-headings old)
+                                       (orsb-core--top-level-headings content)
+                                       #'string=))
+              (shrunk (and (> (length old) 200) (< (length content) (* 0.5 (length old))))))
+         (when (and (not force) (or dropped shrunk))
+           (orsb-error 'refused "whole-note replace would %s; re-read the note and resend the full body, or pass force:true"
+                       (if dropped (format "drop heading(s): %s" (string-join dropped ", "))
+                         (format "shrink the note from %d to %d characters" (length old) (length content)))))
+         (copy-file file (format "%s.bak-%s" file (format-time-string "%s")) t)
+         (delete-region (car b) (cdr b))
+         (goto-char (car b))
+         (insert content)
+         (unless (string-suffix-p "\n" content) (insert "\n")))))
+    (orsb-core--after-write file)
+    t))
+
+;;;; Delete, archive, link
+
+(defun orsb-core-delete-node (node &optional archive)
+  "Delete NODE: a heading subtree, or a whole note (moved to the archive
+directory with ARCHIVE).  Returns the resulting file path, or nil."
+  (let ((file (org-roam-node-file node)))
+    (if (> (org-roam-node-level node) 0)
+        (progn
+          (orsb-core--with-node node
+            (delete-region (point) (save-excursion (org-end-of-subtree t t) (point))))
+          (orsb-core--after-write file)
+          file)
+      (when-let ((buf (find-buffer-visiting file)))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (if archive
+          (let* ((dir (orsb-core--vault-file orsb-archive-directory))
+                 (target (expand-file-name (file-name-nondirectory file) dir)))
+            (make-directory dir t)
+            (rename-file file target t)
+            (orsb-core-db-refresh file target)
+            target)
+        (delete-file file)
+        (orsb-core-db-refresh file)
+        nil))))
+
+(defun orsb-core-link (node target &optional section)
+  "Add a bullet linking to TARGET in NODE's file, under SECTION if given."
+  (let ((file (org-roam-node-file node))
+        (link (format "- [[id:%s][%s]]" (org-roam-node-id target) (org-roam-node-title target))))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (if section
+           (progn (orsb-core--goto-section section t)
+                  (orsb-core--insert-at-body-end (orsb-core--body-bounds) link))
+         (goto-char (point-max))
+         (unless (bolp) (insert "\n"))
+         (insert link "\n"))))
+    (orsb-core--after-write file)
+    t))
+
+;;;; Daily notes and inbox
+
+(defun orsb-core-daily-file (&optional date create)
+  "Path of the daily note for DATE (YYYY-MM-DD, default today).
+With CREATE, make the file (with an :ID:) when it does not exist."
+  (let* ((date (or date (format-time-string "%Y-%m-%d")))
+         (dir (orsb-core--vault-file orsb-daily-directory))
+         (path (expand-file-name (concat date ".org") dir)))
+    (when (and create (not (file-exists-p path)))
+      (make-directory dir t)
+      (with-temp-file path
+        (insert (format ":PROPERTIES:\n:ID: %s\n:NODE-TYPE: daily\n:END:\n#+title: %s\n#+filetags: :daily:\n\n"
+                        (org-id-new) date)))
+      (org-roam-db-update-file path))
+    path))
+
+(defun orsb-core-daily-content (&optional date)
+  "Text of the daily note for DATE, or \"\" when there is none."
+  (let ((path (orsb-core-daily-file date)))
+    (if (file-exists-p path)
+        (with-temp-buffer (insert-file-contents path) (buffer-string))
+      "")))
+
+(defun orsb-core-add-daily-entry (title points &optional next-steps tags timestamp todo)
+  "Append a timestamped heading to today's daily note.
+POINTS and NEXT-STEPS are lists of strings, TAGS a list of tag strings.
+With TODO the heading is a TODO item and NEXT-STEPS become Subtasks."
+  (let ((path (orsb-core-daily-file nil t))
+        (stamp (or timestamp (format-time-string "%H:%M"))))
+    (with-current-buffer (find-file-noselect path)
+      (org-with-wide-buffer
+       (goto-char (point-max))
+       (unless (bolp) (insert "\n"))
+       (insert (format "* %s%s %s%s\n" (if todo "TODO " "") stamp title
+                       (if tags (concat "    :" (string-join tags ":") ":") "")))
+       (dolist (p points) (insert (format "- %s\n" p)))
+       (when next-steps
+         (insert (if todo "\n** Subtasks\n" "\n** Next Steps\n"))
+         (dolist (s next-steps) (insert (format "- [ ] %s\n" s))))
+       (insert "\n")))
+    (orsb-core--after-write path)
+    path))
+
+(defun orsb-core--link-names (text)
+  "Names in [[Name]] links in TEXT (id: links excluded)."
+  (let (out (pos 0))
+    (while (string-match "\\[\\[\\([^]:[]+\\)\\]\\]" text pos)
+      (push (match-string 1 text) out)
+      (setq pos (match-end 0)))
+    (nreverse out)))
+
+(defun orsb-core--ensure-person (name)
+  "Create a minimal person note for NAME unless a node with that title exists.
+Returns the new node, or nil."
+  (unless (org-roam-node-from-title-or-alias name)
+    (orsb-core-create-node "person" name)))
+
+(defun orsb-core-log-to-inbox (text &optional linked-node)
+  "Append TEXT as a timestamped bullet under the inbox heading of today's note.
+LINKED-NODE, when given, is appended as an id link.  [[Name]] links in
+TEXT get a person note created.  Returns the names of people created."
+  (let ((path (orsb-core-daily-file nil t))
+        (created nil))
+    (dolist (name (orsb-core--link-names text))
+      (when (orsb-core--ensure-person name) (push name created)))
+    (with-current-buffer (find-file-noselect path)
+      (org-with-wide-buffer
+       (orsb-core--goto-section orsb-inbox-heading t)
+       (orsb-core--insert-at-body-end
+        (orsb-core--body-bounds)
+        (format "- %s %s%s" (format-time-string "[%Y-%m-%d %a %H:%M]") text
+                (if linked-node
+                    (format " → [[id:%s][%s]]" (org-roam-node-id linked-node) (org-roam-node-title linked-node))
+                  "")))))
+    (orsb-core--after-write path)
+    (nreverse created)))
+
+(defun orsb-core-inbox-entries (&optional days)
+  "Inbox bullets of the last DAYS days (default 7): list of (DATE . LINES)."
+  (let (out)
+    (dotimes (i (or days 7))
+      (let* ((date (format-time-string "%Y-%m-%d" (time-subtract (current-time) (days-to-time i))))
+             (path (orsb-core-daily-file date)))
+        (when (file-exists-p path)
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (when (re-search-forward (format "^\\* %s[ \t]*$" (regexp-quote orsb-inbox-heading)) nil t)
+              (let ((lines nil) (end (save-excursion (or (and (re-search-forward "^\\* " nil t) (match-beginning 0)) (point-max)))))
+                (forward-line 1)
+                (while (< (point) end)
+                  (cond ((looking-at "^[ \t]*- \\(.*\\)$") (push (match-string 1) lines))
+                        ((looking-at "^\\*\\* \\(?:DONE\\|TODO\\) \\(.*\\)$") (push (match-string 1) lines)))
+                  (forward-line 1))
+                (when lines (push (cons date (nreverse lines)) out))))))))
+    (nreverse out)))
+
+;;;; Follow-ups
+
+(defun orsb-core--unchecked-items (file &optional mentioning)
+  "Unchecked checkbox lines in FILE, optionally only those MENTIONING a string."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let (items)
+        (while (re-search-forward "^[ \t]*- \\[ \\] \\(.*\\)$" nil t)
+          (let ((item (string-trim (match-string 1))))
+            (when (or (null mentioning) (string-match-p (regexp-quote mentioning) item))
+              (push item items))))
+        (nreverse items)))))
+
+(defun orsb-core-followups ()
+  "People with unchecked follow-ups: list of plists
+\(:node :followups) where followups are unchecked items mentioning the
+person, from the person's own note and from notes linking to it."
+  (let (out)
+    (dolist (person (seq-filter (lambda (n) (and (= (org-roam-node-level n) 0)
+                                                 (equal "person" (cdr (assoc "NODE-TYPE" (org-roam-node-properties n))))))
+                                (org-roam-node-list)))
+      (let* ((name (org-roam-node-title person))
+             (files (seq-uniq
+                     (cons (org-roam-node-file person)
+                           (mapcar (lambda (bl) (org-roam-node-file (org-roam-backlink-source-node bl)))
+                                   (org-roam-backlinks-get person)))))
+             (items (apply #'append
+                           (orsb-core--unchecked-items (org-roam-node-file person))
+                           (mapcar (lambda (f) (unless (equal f (org-roam-node-file person))
+                                                 (orsb-core--unchecked-items f name)))
+                                   files))))
+        (when items (push (list :node person :followups (seq-uniq items)) out))))
+    (sort out (lambda (a b) (> (length (plist-get a :followups)) (length (plist-get b :followups)))))))
+
+(defun orsb-core-dangling-followups ()
+  "Unchecked items with a [[Name]] link to a title no node has.
+Returns a list of plists (:name :item :file)."
+  (let (out (seen (make-hash-table :test 'equal)))
+    (dolist (file (org-roam-list-files))
+      (dolist (item (orsb-core--unchecked-items file))
+        (dolist (name (orsb-core--link-names item))
+          (unless (or (gethash name seen) (org-roam-node-from-title-or-alias name))
+            (puthash name t seen)
+            (push (list :name name :item item :file file) out)))))
+    (nreverse out)))
+
+;;;; Blog
+
+(defun orsb-core-blog-node-p (node)
+  "Whether NODE is a blog post: NODE-TYPE, blog directory, or Hugo keywords."
+  (let ((type (cdr (assoc "NODE-TYPE" (org-roam-node-properties node))))
+        (dir (cdr (assoc "blog" orsb-directories))))
+    (cond
+     (type (equal type "blog"))
+     ((and dir (not (string-empty-p dir))
+           (string-prefix-p (file-name-as-directory (orsb-core--vault-file dir)) (org-roam-node-file node)))
+      t)
+     (t (seq-some (lambda (kw) (string-prefix-p "HUGO" (car kw))) (orsb-core-node-keywords node))))))
+
+(defun orsb-core--blog-outline (node)
+  "Return (HEADINGS-WITH-TEXT . HEADINGS) for blog NODE."
+  (let ((total 0) (filled 0))
+    (with-temp-buffer
+      (insert-file-contents (org-roam-node-file node))
+      (goto-char (point-min))
+      (while (re-search-forward "^\\*+[ \t]+.+$" nil t)
+        (setq total (1+ total))
+        (let ((start (point))
+              (end (save-excursion (or (and (re-search-forward "^\\*+[ \t]" nil t) (match-beginning 0)) (point-max)))))
+          (when (string-match-p "[[:alnum:]]"
+                                (replace-regexp-in-string ":PROPERTIES:\\(?:.\\|\n\\)*?:END:" ""
+                                                          (buffer-substring-no-properties start end)))
+            (setq filled (1+ filled))))))
+    (cons filled total)))
+
+(defun orsb-core-blog-status ()
+  "Blog overview as a plist: :drafts, :published (recent first), :ideas."
+  (let* ((nodes (seq-filter (lambda (n) (= (org-roam-node-level n) 0)) (org-roam-node-list)))
+         (posts (seq-filter #'orsb-core-blog-node-p nodes))
+         (draft-p (lambda (n)
+                    (let ((status (cdr (assoc "STATUS" (org-roam-node-properties n))))
+                          (kw (cdr (assoc "HUGO_DRAFT" (orsb-core-node-keywords n)))))
+                      (cond (status (not (equal status "published")))
+                            (kw (equal kw "true"))
+                            (t t)))))
+         (drafts (seq-filter draft-p posts))
+         (published (seq-remove draft-p posts))
+         (titles (mapcar (lambda (n) (downcase (org-roam-node-title n))) posts))
+         (ideas (seq-filter (lambda (n)
+                              (and (equal "idea" (cdr (assoc "NODE-TYPE" (org-roam-node-properties n))))
+                                   (not (member (downcase (org-roam-node-title n)) titles))))
+                            nodes)))
+    (list :drafts (mapcar (lambda (n) (list :node n :outline (orsb-core--blog-outline n))) drafts)
+          :published (seq-take (seq-sort-by (lambda (n) (or (org-roam-node-file-mtime n) 0))
+                                            (lambda (a b) (time-less-p b a)) published)
+                               10)
+          :ideas (seq-take ideas 10))))
 
 (provide 'orsb-core)
 ;;; orsb-core.el ends here

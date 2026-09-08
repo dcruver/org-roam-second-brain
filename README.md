@@ -1,209 +1,132 @@
 # org-roam-second-brain
 
-A "Second Brain" system for [org-roam](https://www.orgroam.com/), providing structured note types, semantic search, and proactive knowledge surfacing.
+A second brain on top of [org-roam](https://www.orgroam.com/): typed notes
+(projects, people, ideas, admin, blog posts) with conventions an agent can
+rely on, semantic search over your vault, a daily digest, and an **MCP server**
+so an LLM assistant uses the same notes you do. Everything is Emacs Lisp; the
+only external service is an OpenAI-compatible embeddings endpoint (optional).
 
-## Features
+Version 2.0 has one core and one contract:
 
-### Structured Node Types
-Create notes with predefined structures:
-- **Person** - Track people with context, follow-ups, and notes
-- **Project** - Manage projects with status, next actions, and notes
-- **Idea** - Capture ideas with one-liners and elaboration
-- **Admin** - Track administrative tasks with due dates
+| Module | What it is |
+|---|---|
+| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create typed notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
+| `orsb-tools.el` | The 18-tool MCP contract on top of the core, one `id` parameter, one `{ok, data | error}` envelope, one status vocabulary. The pre-2.0 tool names remain as deprecated mappers (see `MIGRATION.md`). |
+| `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
+| `orsb-search.el` | Semantic search: chunk embeddings stored in the notes beside a content hash, an mtime-keyed index with a cache file, and an idle-time worker that re-embeds what changed. |
+| `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
+| `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`), capture commands, the daily digest, blog helpers. |
+| `org-agenda-project-tracking.el` | Optional agenda views and TODO journaling (`orsb-agenda-setup`). |
 
-### Proactive Surfacing
-- **Daily Digest** - See active projects, pending follow-ups, stale items, and blog status at a glance
-- **Stale Projects** - Find projects that haven't been touched recently
-- **Pending Follow-ups** - Track unchecked items mentioning people
-- **Dangling Links** - Find `[[Name]]` links without corresponding person nodes
-- **Blog Status** - Track drafts, published posts, and ideas that could become posts
+## Install
 
-### Blog Management
-- **Create Posts** - Create blog posts with Hugo export metadata
-- **Draft Tracking** - Track outline progress and content status
-- **AI Assistance** - Generate outlines, expand sections, adjust tone
-- **Publish Workflow** - Validate and publish posts
+Doom Emacs (`packages.el` and `config.el`):
 
-### Daily Auto-Linking
-- **Semantic Connections** - Automatically link daily notes to related concepts
-- **Cross-Day Links** - Find connections between daily entries across time
+```elisp
+(package! org-roam-second-brain
+  :recipe (:host github :repo "dcruver/org-roam-second-brain"))
 
-### Semantic Search
-- **Link Suggestions** - Find semantically similar notes that aren't already linked
-- **Vector Embeddings** - Store embeddings in org properties for portable, git-trackable notes
+(use-package! org-roam-second-brain
+  :after org-roam
+  :config
+  (orsb-mode 1))
+```
 
-## Installation
-
-### Using straight.el (recommended)
+straight.el:
 
 ```elisp
 (straight-use-package
- '(org-roam-second-brain :host github :repo "dcruver/org-roam-second-brain"))
+ '(org-roam-second-brain :type git :host github :repo "dcruver/org-roam-second-brain"))
+(require 'org-roam-second-brain)
+(orsb-mode 1)
 ```
 
-### Using Doom Emacs
+Requires Emacs 28.1+ and org-roam 2.2+.
+
+## Configure
+
+Everything environment-specific is a defcustom in the `orsb` group:
 
 ```elisp
-;; In packages.el
-(package! org-roam-second-brain
-  :recipe (:host github :repo "dcruver/org-roam-second-brain"))
+(setq org-roam-directory "~/org-roam")
+;; vault layout (defaults shown)
+(setq orsb-directories '(("project" . "projects") ("person" . "people") ("idea" . "ideas")
+                         ("admin" . "admin") ("blog" . "blog") ("reference" . "reference")
+                         ("howto" . "howto") ("note" . "")))
+(setq orsb-daily-directory "daily" orsb-archive-directory "archive")
+;; status vocabulary and staleness
+(setq orsb-status-values '("active" "waiting" "blocked" "someday" "done" "cancelled")
+      orsb-stale-days 5)
+;; blog posts (ox-hugo); nil refuses blog creation
+(setq orsb-hugo-base-dir "~/Projects/my-site/" orsb-hugo-sections '("homelab" "writing"))
+;; semantic search (any OpenAI-compatible /embeddings endpoint, e.g. Ollama or Infinity)
+(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
+      org-roam-semantic-embedding-model "nomic-embed-text")
 ```
+
+## The MCP server
 
 ```elisp
-;; In config.el
-(setq org-roam-directory (file-truename "~/org-roam"))
-
-;; Load org-roam-second-brain after org-roam
-(use-package! org-roam-second-brain
-  :after org-roam)
-
-;; Configure embedding server (required for semantic features)
-(after! org-roam-vector-search
-  (setq org-roam-semantic-embedding-url "http://localhost:8080")
-  (setq org-roam-semantic-embedding-model "nomic-ai/nomic-embed-text-v1.5"))
+(setq orsb-mcp-host "127.0.0.1"    ; "0.0.0.0" to serve your LAN
+      orsb-mcp-port 8007
+      orsb-mcp-auth-token nil)     ; set a string to require Authorization: Bearer
+(orsb-mcp-start)
 ```
 
-Then run `doom sync`.
+Point an MCP client at `http://host:8007/mcp` (Streamable HTTP, POST only; no
+SSE stream). The server keeps one session per client, times out a tool after
+`orsb-mcp-tool-timeout` seconds, and logs every request to `*orsb-mcp-log*`.
 
-### Updating the Package
+Try it:
 
-To update to the latest version:
-
-```bash
-doom sync -u
+```sh
+curl -s -X POST http://localhost:8007/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_schema","arguments":{}}}'
 ```
 
-Or rebuild just this package:
+### Tools
 
-```elisp
-M-x straight-rebuild-package RET org-roam-second-brain RET
+| Tool | Purpose |
+|---|---|
+| `search` | title / contextual / semantic search; hits carry id, type, status, snippet |
+| `get_node` | one node: properties (its drawer), keywords, tags, links, body, or one `section` |
+| `list_nodes` | file nodes filtered by type, status, staleness, tags |
+| `create_node` | a typed note in its conventional directory |
+| `add_heading` | a heading node with its own id |
+| `set_node` | title, status (validated), todo, properties, tags, keywords |
+| `update_body` | append / prepend / replace, per section or whole note (guarded) |
+| `delete_node` | delete a heading, or delete / archive a note |
+| `link_nodes` | add or remove an `[[id:...]]` link |
+| `add_daily_entry`, `get_daily`, `log_to_inbox` | daily notes and the inbox |
+| `get_digest`, `get_projects`, `get_followups`, `get_blog_status` | surfacing |
+| `sync` | database and embedding refresh |
+| `get_schema` | the vocabulary the server enforces |
+
+Every tool takes `id` as an org-roam id, a vault-relative path, or an exact
+title, and answers `{"ok":true,"data":{...}}` or
+`{"ok":false,"error":{"code","message","hint"}}` (with MCP `isError`).
+Status is validated: `active | waiting | blocked | someday | done | cancelled`
+for notes, `idea | stub | draft | published` for blog posts.
+`M-x orsb-migrate-status` normalizes older spellings in a vault.
+
+## Semantic search
+
+Embeddings are stored in the notes themselves (`:EMBEDDING:` next to an
+`:EMBEDDING_HASH:` of the chunk text), so they travel with the vault. Saving
+a note queues it; an idle-time worker re-embeds only the chunks whose text
+changed. Queries read an in-memory index persisted to
+`orsb-search-cache-file`. For an existing vault run
+`M-x orsb-search-backfill-hashes` once, then `sync {"embeddings": true}` or
+`M-x org-roam-semantic-generate-all-chunks`.
+
+## Develop
+
+```sh
+make test     # ERT against a throwaway vault (ORSB_DEPS points at your org-roam build)
+make compile  # byte-compile everything, warnings shown
+make lint     # warnings are errors for the orsb-* modules
+make reload   # reload into a running Emacs server and restart the MCP server
 ```
 
-Or via command line:
-```bash
-emacsclient --eval '(straight-rebuild-package "org-roam-second-brain")'
-```
-
-## Configuration
-
-Configure the embedding service URL (required for semantic features):
-
-```elisp
-(setq org-roam-semantic-embedding-url "http://localhost:8080")
-(setq org-roam-semantic-embedding-model "nomic-ai/nomic-embed-text-v1.5")
-```
-
-Or use `M-x customize-group RET org-roam-vector-search RET`.
-
-### Second Brain Options
-
-```elisp
-(setq sb/stale-days 5)                    ; Days before project is "stale"
-(setq sb/similarity-threshold 0.6)        ; Minimum similarity for suggestions
-(setq sb/show-digest-on-startup t)        ; Show digest when Emacs starts
-(setq sb/proactive-suggestions nil)       ; Show suggestion hints when visiting notes (off by default)
-```
-
-Or use `M-x customize-group RET sb RET`.
-
-## Usage
-
-### Key Bindings (C-c b prefix)
-
-| Key | Command | Description |
-|-----|---------|-------------|
-| `C-c b p` | `sb/person` | Create a person node |
-| `C-c b P` | `sb/project` | Create a project node |
-| `C-c b i` | `sb/idea` | Create an idea node |
-| `C-c b a` | `sb/admin` | Create an admin task |
-| `C-c b I` | `sb/inbox` | Log to inbox |
-| `C-c b d` | `sb/digest` | Show daily digest |
-| `C-c b f` | `sb/followups` | Show pending follow-ups |
-| `C-c b s` | `sb/stale` | Show stale projects |
-| `C-c b u` | `sb/dangling` | Show untracked people |
-| `C-c b L` | `sb/suggest-links` | Find unlinked similar notes |
-| `C-c b w` | `sb/weekly` | Show weekly review |
-| `C-c b /` | `sb/search` | Search notes by title |
-| `C-c b l p` | `sb/projects` | List all projects |
-| `C-c b l e` | `sb/people` | List all people |
-| `C-c b l i` | `sb/ideas` | List all ideas |
-| `C-c b B` | `sb/blog` | Create a blog post |
-| `C-c b l b` | `sb/blog-list` | List all blog posts |
-| `C-c b D l` | `sb/daily-link` | Link current daily to related notes |
-| `C-c b D L` | `sb/daily-link-all` | Batch link all daily files |
-| `C-c b D c` | `sb/daily-connections` | Show daily connections report |
-
-### Buffer Navigation (in result buffers)
-
-| Key | Description |
-|-----|-------------|
-| `j` / `n` | Next item |
-| `k` / `p` | Previous item |
-| `RET` | Open item |
-| `g` / `gr` | Refresh |
-| `q` | Quit |
-| `c` | Create person (for dangling links) |
-
-## Embedding Service
-
-Semantic features require an embedding service. Options:
-
-### Infinity (recommended)
-```bash
-docker run -p 8080:7997 michaelf34/infinity:latest \
-  --model-id nomic-ai/nomic-embed-text-v1.5 --port 7997
-```
-
-### Ollama
-```bash
-ollama pull nomic-embed-text
-# Uses port 11434 by default
-```
-
-Then configure:
-```elisp
-(setq org-roam-semantic-embedding-url "http://localhost:11434/v1")
-(setq org-roam-semantic-embedding-model "nomic-embed-text")
-```
-
-## Package Contents
-
-- `org-roam-vector-search.el` - Vector embeddings and semantic search
-- `org-roam-second-brain.el` - Structured notes and proactive surfacing
-- `org-roam-api.el` - API functions for MCP server integration
-- `org-roam-api.el` - API functions for MCP server integration
-
-## License
-
-GPL-3.0
-
-## MCP Server Integration
-
-This package includes `org-roam-api.el`, which provides the API functions used by [org-roam-mcp](https://github.com/dcruver/org-roam-ai) — a Python MCP server for external tool integration.
-
-### Loading the API
-
-```elisp
-(require 'org-roam-api)
-```
-
-### What it provides
-
-The `my/api-*` functions return JSON-formatted responses for:
-- **Search**: semantic_search, contextual_search, search_notes
-- **CRUD**: create_note, read_note, update_note, delete_note
-- **Tasks**: change_task_state, list_notes, get_note_properties
-- **Daily**: add_daily_entry, get_daily_content
-- **Surfacing**: get_digest_data, get_active_projects, get_stale_projects, etc.
-
-### MCP Server Setup
-
-To expose these functions via HTTP/JSON-RPC:
-
-```bash
-pip install org-roam-mcp
-export EMACS_SERVER_FILE=~/emacs-server/server
-org-roam-mcp --port 8001
-```
-
-See [org-roam-ai](https://github.com/dcruver/org-roam-ai) for full MCP server documentation.
+CI runs the same on Emacs 28, 29 and 30. See `SETUP.md` for a full
+walkthrough and `MIGRATION.md` for the 1.x → 2.0 tool mapping.
