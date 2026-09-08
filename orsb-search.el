@@ -156,6 +156,7 @@ drawer lines) decides whether the chunk is embedded or only gets an id."
       (let ((orsb-search--inhibit-hooks t)
             (inhibit-read-only t))
         (write-region (point-min) (point-max) file nil :silent)
+        (set-visited-file-modtime)
         (set-buffer-modified-p nil)))))
 
 (defun orsb-search-generate-file (file &optional force)

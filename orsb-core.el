@@ -122,6 +122,9 @@ The hooks (embedding generation, toc-org) are slow and unsafe on the MCP
 request path; the embedding refresh is queued separately."
   (let ((inhibit-read-only t))
     (write-region (point-min) (point-max) (buffer-file-name) nil :silent)
+    ;; Record the new modtime, or the next edit asks about supersession
+    ;; (a prompt that kills a batch/daemon session).
+    (set-visited-file-modtime)
     (set-buffer-modified-p nil)))
 
 (defun orsb-core--after-write (file)
