@@ -460,8 +460,11 @@ FIELDS are total, returned and, when more remain, next_offset."
 
 ;;;; The whole graph
 
-(defun orsb-tool-get-graph (_args)
-  "get_graph."
+(defun orsb-tools-graph ()
+  "Every node and every id link, for drawing the graph (GET /graph).
+Nodes carry id, title, vault-relative file, level, pos (character
+position in the file) and tags; links are [source dest] pairs.  Reads
+the database only; no bodies."
   (let ((tags (make-hash-table :test 'equal)))
     (dolist (row (org-roam-db-query [:select [node-id tag] :from tags]))
       (when (and (stringp (nth 1 row)) (not (string-empty-p (nth 1 row))))
@@ -480,6 +483,10 @@ FIELDS are total, returned and, when more remain, next_offset."
                  (mapcar (lambda (row) (vector (car row) (nth 1 row)))
                          (org-roam-db-query [:select :distinct [source dest] :from links
                                              :where (= type "id")])))))))
+
+(defun orsb-tool-get-graph (_args)
+  "get_graph: the same data as GET /graph."
+  (orsb-tools-graph))
 
 (defun orsb-tools--created-key (record node)
   "Sort key for created order: CREATED property, the filename stamp, else modified."

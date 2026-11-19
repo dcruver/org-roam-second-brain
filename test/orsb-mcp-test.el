@@ -164,4 +164,35 @@
         (remhash "slow_test_tool" org-roam-mcp-http--tools)))))
 
 (provide 'orsb-mcp-test)
+;;;; GET /graph: the graph for a program that draws it (not an MCP tool)
+
+(ert-deftest orsb-mcp-get-graph-endpoint ()
+  (orsb-test-with-vault
+  (orsb-mcp-test--fresh
+    (cl-flet ((get (path &rest headers)
+                (org-roam-mcp-http--handle-request
+                 (list :method "GET" :path path
+                       :headers (string-join (append (list (format "GET %s HTTP/1.1" path) "Host: test") headers) "\r\n")
+                       :body ""))))
+      (let* ((resp (get "/graph"))
+             (json (json-parse-string (substring resp (+ 4 (string-match "\r\n\r\n" resp)))
+                                      :object-type 'alist :array-type 'list))
+             (data (alist-get 'data json))
+             (nodes (alist-get 'nodes data))
+             (hub (seq-find (lambda (n) (equal (alist-get 'id n) "1784854105")) nodes)))
+        (should (= 200 (orsb-mcp-test--status resp)))
+        (should (eq (alist-get 'ok json) t))
+        (should (= (length nodes) (caar (org-roam-db-query [:select (funcall count id) :from nodes]))))
+        (should (equal (alist-get 'title hub) "Project Backlog"))
+        (should (equal (alist-get 'file hub) "projects/project-backlog-1784854105.org"))
+        (should (integerp (alist-get 'pos hub)))
+        (should (listp (alist-get 'links data))))
+      (should (= 200 (orsb-mcp-test--status (get "/graph?x=1"))))
+      ;; any other GET is still refused, and a token is required when one is set
+      (should (= 405 (orsb-mcp-test--status (get "/mcp"))))
+      (should (= 405 (orsb-mcp-test--status (get "/graphs"))))
+      (let ((orsb-mcp-auth-token "s3cret"))
+        (should (= 401 (orsb-mcp-test--status (get "/graph"))))
+        (should (= 200 (orsb-mcp-test--status (get "/graph" "Authorization: Bearer s3cret")))))))))
+
 ;;; orsb-mcp-test.el ends here

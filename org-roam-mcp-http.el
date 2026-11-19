@@ -338,7 +338,7 @@ in Mcp-Session-Id."
   (let ((session-header (if org-roam-mcp-http--session-id
                             (format "Mcp-Session-Id: %s\r\n" org-roam-mcp-http--session-id)
                           "")))
-    (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Authorization, Mcp-Session-Id\r\n%s%sConnection: close\r\n\r\n%s"
+    (format "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Accept, Authorization, Mcp-Session-Id\r\n%s%sConnection: close\r\n\r\n%s"
             status content-type (string-bytes body) session-header (or extra-headers "") body)))
 
 (defun org-roam-mcp-http--header (headers name)
@@ -377,6 +377,10 @@ no longer confuse a request whose headers ended with \\n\\n."
       (equal (org-roam-mcp-http--header headers "Authorization")
              (concat "Bearer " orsb-mcp-auth-token))))
 
+(defun org-roam-mcp-http--graph-path-p (path)
+  "Non-nil when PATH (which may carry a query string) is /graph."
+  (and (stringp path) (string-match-p "\\`/graph/?\\(\\?.*\\)?\\'" path)))
+
 (defun org-roam-mcp-http--handle-request (req)
   "Produce the full HTTP response string for parsed request REQ.
 Pure with respect to the network: safe to call from tests."
@@ -388,13 +392,25 @@ Pure with respect to the network: safe to call from tests."
     (cond
      ((equal method "OPTIONS")
       (org-roam-mcp-http--make-http-response "204 No Content" "text/plain" ""))
-     ((equal method "GET")
+     ((and (equal method "GET") (not (org-roam-mcp-http--graph-path-p (plist-get req :path))))
       ;; MCP Streamable HTTP: GET opens an SSE stream, which we do not offer.
       (org-roam-mcp-http--make-http-response "405 Method Not Allowed" "text/plain" ""))
      ((not (org-roam-mcp-http--authorized-p headers))
       (orsb-mcp--log "%s rejected: bad or missing bearer token" method)
       (org-roam-mcp-http--make-http-response "401 Unauthorized" "text/plain" ""
                                              "WWW-Authenticate: Bearer\r\n"))
+     ((equal method "GET")
+      ;; GET /graph: the whole graph for a program that draws it.  Not an MCP
+      ;; tool: a model has no use for three thousand nodes.
+      (condition-case err
+          (org-roam-mcp-http--make-http-response
+           "200 OK" "application/json"
+           (json-encode `((ok . t) (data . ,(orsb-tools-graph)))))
+        (error
+         (orsb-mcp--log "GET /graph failed: %s" (error-message-string err))
+         (org-roam-mcp-http--make-http-response
+          "500 Internal Server Error" "application/json"
+          (json-encode `((ok . :json-false) (error . ((message . ,(error-message-string err))))))))))
      ((equal method "DELETE")
       (if (orsb-mcp--session-delete client-session)
           (progn (orsb-mcp--log "session %s terminated by client" client-session)

@@ -141,6 +141,14 @@ Options:
                                       ; (one embedding call per create)
 ```
 
+### The graph, for drawing
+
+`GET /graph` on the same port answers `{"ok":true,"data":{"nodes":[...],"links":[...]}}`:
+every node (id, title, vault-relative file, level, pos, tags) and every id link
+as a `[source, dest]` pair, straight from the database, no bodies. It is a plain
+HTTP endpoint, not an MCP tool, because it is for a program that draws the graph,
+not for a model. It honours `orsb-mcp-auth-token` like the rest.
+
 ## Semantic search
 
 Embeddings live in one SQLite file beside the notes, not in them:
