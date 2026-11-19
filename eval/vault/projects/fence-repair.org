@@ -1,0 +1,17 @@
+:PROPERTIES:
+:ID:       eval-fence
+:NODE-TYPE: project
+:STATUS:   active
+:NEXT-ACTION: Rehang the gate
+:END:
+#+title: Fence repair
+#+filetags: :homestead:
+
+Split rail fence along the north property line. The neighbor shares the cost
+of the stretch along the road.
+
+* Tasks
+** TODO Fix the fence gate
+DEADLINE: <2025-06-01 Sun>
+The gate sags and drags on the ground; new hinges are in the shed.
+** TODO Replace three rotten rails

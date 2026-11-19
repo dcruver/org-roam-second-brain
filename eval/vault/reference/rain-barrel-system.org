@@ -1,0 +1,9 @@
+:PROPERTIES:
+:ID:       eval-rain-1
+:NODE-TYPE: reference
+:END:
+#+title: Rain barrel system
+
+Two 55 gallon rain barrels on cinder blocks at the shed downspout, joined with
+a hose at the bottom spigots. A first flush diverter keeps roof grit out.
+Drain them before the first hard freeze.

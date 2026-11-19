@@ -156,6 +156,7 @@ make test     # ERT against a throwaway vault (ORSB_DEPS points at your org-roam
 make compile  # byte-compile everything, warnings shown
 make lint     # warnings are errors for the orsb-* modules
 make reload   # reload into a running Emacs server and restart the MCP server
+make eval     # give a local model everyday vault chores and score them (eval/README.md)
 ```
 
 CI runs the same on Emacs 29 and 30. See `SETUP.md` for a full

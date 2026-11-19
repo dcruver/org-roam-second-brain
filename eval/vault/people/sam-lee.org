@@ -1,0 +1,8 @@
+:PROPERTIES:
+:ID:       eval-sam
+:NODE-TYPE: person
+:CONTEXT:  Neighbor down the road
+:END:
+#+title: Sam Lee
+
+Neighbor down the road. Has a truck and a trailer, good with framing and roofing.

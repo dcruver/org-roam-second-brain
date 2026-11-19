@@ -6,7 +6,7 @@ export ORSB_DEPS
 
 SOURCES := orsb-core.el orsb-search.el orsb-tools.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el org-agenda-project-tracking.el
 
-.PHONY: test lint compile clean reload
+.PHONY: test lint compile clean reload eval eval-selfcheck
 
 test:
 	$(EMACS) -Q --batch -l test/run.el
@@ -35,3 +35,16 @@ clean:
 SERVER ?= $(HOME)/emacs-server/server
 reload:
 	emacsclient -s $(SERVER) --eval '(progn (dolist (f (list "orsb-core" "org-roam-api" "org-roam-mcp-http")) (load f)) (org-roam-mcp-http-stop) (org-roam-mcp-http-start org-roam-mcp-http--port) (hash-table-count org-roam-mcp-http--tools))'
+
+# Small-model chores (eval/README.md).  Point it at a model with, e.g.
+#   make eval EVAL_ARGS="--base-url http://localhost:8080/v1 --model qwen3.8-27b"
+PYTHON ?= python3
+EVAL_ARGS ?=
+eval:
+	$(PYTHON) eval/run_eval.py --emacs $(EMACS) $(EVAL_ARGS)
+
+# No model needed: the known good tool calls must pass every chore, and doing
+# nothing must fail every chore.  Run this after changing a tool or a chore.
+eval-selfcheck:
+	$(PYTHON) eval/run_eval.py --emacs $(EMACS) --scripted --expect pass --out eval/results/selfcheck-scripted
+	$(PYTHON) eval/run_eval.py --emacs $(EMACS) --null-model --expect fail --out eval/results/selfcheck-null

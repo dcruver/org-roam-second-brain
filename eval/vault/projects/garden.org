@@ -1,0 +1,31 @@
+:PROPERTIES:
+:ID:       eval-garden
+:NODE-TYPE: project
+:STATUS:   active
+:NEXT-ACTION: Finish the raised bed before spring planting
+:END:
+#+title: Garden
+#+filetags: :homestead:
+
+Vegetable garden behind the house. Water comes from the shed downspout, see
+[[id:eval-rain-2][Rainwater collection]].
+
+* Beds
+** TODO Build the raised bed
+DEADLINE: <2027-02-15 Mon>
+- [ ] buy cedar boards
+- [ ] buy screws
+- [X] measure the space
+** DONE Pick a spot for the beds
+* Chores
+** TODO Install chicken waterer
+:PROPERTIES:
+:ID:       eval-waterer
+:END:
+Nipple waterer on a five gallon bucket, mounted inside the run.
+** TODO Turn the compost pile
+SCHEDULED: <2027-04-01 Thu>
+* Winter seed list
+- garlic (hardneck)
+- spinach
+- kale

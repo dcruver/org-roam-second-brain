@@ -1,0 +1,15 @@
+:PROPERTIES:
+:ID:       eval-coop
+:NODE-TYPE: project
+:STATUS:   active
+:NEXT-ACTION: Frame the walls
+:END:
+#+title: Chicken coop
+#+filetags: :homestead:
+
+Eight by ten foot coop for six hens next to the garden, with a covered run.
+Framing with pressure treated lumber, metal roof, nesting boxes on the east wall.
+
+* Tasks
+** DONE Pour the footings
+** TODO Frame the walls
