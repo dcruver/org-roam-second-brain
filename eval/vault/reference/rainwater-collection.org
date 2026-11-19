@@ -1,0 +1,8 @@
+:PROPERTIES:
+:ID:       eval-rain-2
+:NODE-TYPE: reference
+:END:
+#+title: Rainwater collection
+
+Collecting rain from the shed roof for the garden. Plan: add a food grade IBC
+tote (275 gallons) beside the barrels and run a soaker hose to the beds.

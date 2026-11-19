@@ -1,0 +1,8 @@
+:PROPERTIES:
+:ID:       eval-router
+:NODE-TYPE: reference
+:END:
+#+title: Old router notes
+
+Settings from the old consumer router before the firewall replaced it. Admin
+page was on the default address; WPA2 network named after the farm.

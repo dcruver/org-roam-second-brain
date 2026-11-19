@@ -1,0 +1,9 @@
+:PROPERTIES:
+:ID:       eval-coldframe
+:NODE-TYPE: idea
+:ONE-LINER: A cold frame from salvaged windows to start greens early
+:END:
+#+title: Cold frame
+
+Use the old windows from the barn to build a cold frame against the south
+side of the shed for early spinach and lettuce. Links to [[id:eval-garden][Garden]].

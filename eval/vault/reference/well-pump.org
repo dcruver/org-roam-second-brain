@@ -1,0 +1,14 @@
+:PROPERTIES:
+:ID:       eval-well
+:NODE-TYPE: reference
+:END:
+#+title: Well pump
+
+Submersible pump, Grundfos SQ 2-85, half horsepower, 230 volts, set at 180 feet.
+Installed in 2019. The pressure switch is set to 40/60 psi (cut in at 40, cut
+out at 60). The pressure tank is a 44 gallon bladder tank in the basement,
+precharged to 38 psi.
+
+* Maintenance
+- Check the tank precharge every spring with the power off and the tank drained.
+- The breaker is number 14 in the main panel.

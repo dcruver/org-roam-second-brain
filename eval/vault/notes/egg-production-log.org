@@ -1,0 +1,8 @@
+:PROPERTIES:
+:ID:       eval-eggs
+:END:
+#+title: Egg production log
+
+Daily egg counts from the hens once they start laying in the new coop. Six
+hens should give four or five eggs a day in summer, fewer in winter without
+extra light in the coop.

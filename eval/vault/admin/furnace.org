@@ -1,0 +1,12 @@
+:PROPERTIES:
+:ID:       eval-furnace
+:NODE-TYPE: admin
+:END:
+#+title: Furnace maintenance
+
+Oil furnace in the basement, serviced every fall.
+
+* TODO Replace the furnace filter
+SCHEDULED: <2026-11-01 Sun>
+16x25x1 pleated filter, spares on the shelf by the stairs.
+* DONE Annual furnace service
