@@ -89,7 +89,7 @@ class McpServer:
         env = dict(os.environ,
                    ORSB_EVAL_VAULT=vault, ORSB_EVAL_STATE=state, ORSB_EVAL_PORT=str(port),
                    ORSB_EVAL_EMBED_URL=embed_url or "", ORSB_EVAL_EMBED_MODEL=args.embed_model,
-                   ORSB_EVAL_EMBED_DIMS=str(args.embed_dims), ORSB_EVAL_PROFILE=args.profile)
+                   ORSB_EVAL_EMBED_DIMS=str(args.embed_dims))
         if args.deps is not None:
             env["ORSB_DEPS"] = args.deps
         self.log_path = os.path.join(state, "emacs.log")
@@ -410,7 +410,7 @@ def summarize(records):
 
 def markdown(meta, summary, records):
     lines = [f"# Second brain chores: {meta['model']}", "",
-             f"Run {meta['started']} against {meta['endpoint']}; tool profile {meta['profile']}; "
+             f"Run {meta['started']} against {meta['endpoint']}; "
              f"embeddings: {meta['embeddings']}.", "",
              f"**{summary['passed']} of {summary['runs']} runs passed**, mean check score {summary['mean_score']:.2f}. "
              f"{summary['tool_calls']} tool calls, {summary['tool_errors']} tool errors, "
@@ -466,7 +466,6 @@ def main():
     s = p.add_argument_group("server")
     s.add_argument("--emacs", default=os.environ.get("EMACS", "emacs"))
     s.add_argument("--deps", default=None, help="like ORSB_DEPS for make test: where org-roam is installed")
-    s.add_argument("--profile", default="small", choices=["small", "full"], help="MCP tool profile")
     s.add_argument("--embed-url", help="your OpenAI-compatible embeddings base URL; default: start the stand-in")
     s.add_argument("--embed-model", default="stand-in")
     s.add_argument("--embed-dims", type=int, default=768)
@@ -505,7 +504,7 @@ def main():
         embed_url = f"http://127.0.0.1:{embedder.server_address[1]}/v1"
 
     meta = {"model": label, "endpoint": "none" if (args.scripted or args.null_model) else args.base_url,
-            "profile": args.profile, "started": stamp, "today": today,
+            "started": stamp, "today": today,
             "embeddings": "off" if args.no_embeddings else (args.embed_url or "stand-in (word overlap)")}
     records = []
     for chore in chosen:

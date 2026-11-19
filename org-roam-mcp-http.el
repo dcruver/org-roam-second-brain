@@ -21,7 +21,7 @@
 (require 'cl-lib)
 (require 'org-id)
 (require 'orsb-core)
-;; The tool contract (2.0 tools plus the deprecated names).
+;; The tool contract.
 (require 'orsb-tools)
 
 ;; The port lives in `orsb-mcp-port' (transport section below);
@@ -52,10 +52,6 @@ Set by `initialize' to the new session so the response carries it.")
 (cl-defstruct (org-roam-mcp-tool (:constructor org-roam-mcp-tool-create))
   "An MCP tool registration."
   name description fn args-spec required-args schema)
-
-(defun org-roam-mcp-http--set-tool-description (tool description)
-  "Replace TOOL's DESCRIPTION (used by orsb-tools to mark deprecations)."
-  (setf (org-roam-mcp-tool-description tool) description))
 
 (defun org-roam-mcp-http--register-tool (name description fn args-spec required-args schema)
   "Register a tool NAME with DESCRIPTION, FN, ARGS-SPEC, REQUIRED-ARGS, and SCHEMA."
@@ -105,19 +101,14 @@ Set by `initialize' to the new session so the response carries it.")
                 (when (eq result :timeout)
                   (orsb-mcp--log "tool %s timed out after %ss" tool-name orsb-mcp-tool-timeout)
                   (setq result
-                        (if (orsb-tools-legacy-name-p tool-name)
-                            ;; legacy shape
-                            (json-encode `((success . :json-false)
-                                           (error . ,(format "Tool %s timed out after %s seconds" tool-name orsb-mcp-tool-timeout))))
-                          (json-encode `((ok . :json-false)
-                                         (error . ((code . "timeout")
-                                                   (message . ,(format "Tool %s timed out after %s seconds" tool-name orsb-mcp-tool-timeout))
-                                                   (hint . "The server is busy or the operation is slow; try again or narrow the request."))))))))
+                        (json-encode `((ok . :json-false)
+                                       (error . ((code . "timeout")
+                                                 (message . ,(format "Tool %s timed out after %s seconds" tool-name orsb-mcp-tool-timeout))
+                                                 (hint . "The server is busy or the operation is slow; try again or narrow the request.")))))))
                 (orsb-mcp--log "tool %s %.0f ms%s" tool-name (* 1000 (- (float-time) started))
                                (if (string-prefix-p "{\"ok\":false" result) " (error)" ""))
-                ;; result is a JSON string: the {"ok":...} envelope for 2.0
-                ;; tools (MCP isError on failure) or the legacy {"success":...}
-                ;; shape for deprecated names.
+                ;; result is a JSON string: the {"ok":...} envelope (MCP
+                ;; isError on failure).
                 (let ((is-error (string-prefix-p "{\"ok\":false" result)))
                   (json-encode `((result . ((content . [((type . "text")
                                                          (text . ,result))])

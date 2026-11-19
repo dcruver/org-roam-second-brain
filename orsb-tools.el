@@ -20,11 +20,11 @@
 ;; recorded as a change with an id that `restore' undoes, and most writes
 ;; take dry_run to preview.  Everything is implemented on `orsb-core'.
 ;;
-;; `orsb-mcp-tool-profile' picks the set: `small' (the nineteen) or `full'
-;; (adds sync, get_blog_status and get_graph).  The pre-2.0 names, and the 2.0 tools
-;; folded into others in 2.1, are registered only while
-;; `orsb-mcp-legacy-tools' is non-nil, marked deprecated; the pre-2.0 ones
-;; answer in the old {"success": ...} shape.
+;; There is one tool set, `orsb-tools--definitions' (nineteen tools).  The
+;; pre-2.0 names, the 2.0 tools folded into others in 2.1 and the tool
+;; profiles were removed in 2.2; MIGRATION.md maps each old name to its
+;; replacement.  The whole graph, for a program that draws it, is the plain
+;; HTTP endpoint GET /graph (`orsb-tools-graph'), not a tool.
 
 ;;; Code:
 
@@ -78,21 +78,6 @@
   :type 'integer
   :group 'orsb)
 
-(defcustom orsb-mcp-legacy-tools nil
-  "When non-nil the pre-2.0 tool names stay registered, marked deprecated.
-So do the 2.0 tools that 2.1 folded into others (add_heading, get_daily,
-get_projects, get_followups, get_digest).  Off by default: every extra
-tool costs a small model context and a chance to pick the wrong one."
-  :type 'boolean
-  :group 'orsb)
-
-(defcustom orsb-mcp-tool-profile 'small
-  "Which tools the MCP server offers.
-`small' is the nineteen-tool set meant for small local models; `full'
-adds sync, get_blog_status and get_graph."
-  :type '(choice (const small) (const full))
-  :group 'orsb)
-
 (defcustom orsb-mcp-instructions
   "This server keeps an org-roam second brain (plain-text notes that link to each other).
 - Find before you create: search, then get_node. create_node refuses a title that already exists and lists it.
@@ -110,7 +95,7 @@ adds sync, get_blog_status and get_graph."
   :type '(repeat string)
   :group 'orsb)
 
-(defconst orsb-tools-version "2.1.0")
+(defconst orsb-tools-version "2.2.0")
 
 ;;;; Argument helpers
 
@@ -484,10 +469,6 @@ the database only; no bodies."
                          (org-roam-db-query [:select :distinct [source dest] :from links
                                              :where (= type "id")])))))))
 
-(defun orsb-tool-get-graph (_args)
-  "get_graph: the same data as GET /graph."
-  (orsb-tools-graph))
-
 (defun orsb-tools--created-key (record node)
   "Sort key for created order: CREATED property, the filename stamp, else modified."
   (or (when-let ((c (cdr (assoc "CREATED" (org-roam-node-properties node)))))
@@ -534,21 +515,13 @@ the database only; no bodies."
                 (_ (orsb-error 'invalid-argument "sort_by must be modified, created or title")))))))
 
 (defun orsb-tools--list (args)
-  "Shared filter/sort for list_nodes and the deprecated get_projects (first LIMIT)."
+  "Shared filter/sort for list_nodes (first LIMIT)."
   (seq-take (orsb-tools--list-records args) (orsb-arg-int args 'limit 50)))
 
 (defun orsb-tool-list-nodes (args)
   "list_nodes."
   (let ((p (orsb-tools--page (orsb-tools--list-records args) args 50)))
     (append (cdr p) `((nodes . ,(orsb--vector (car p)))))))
-
-(defun orsb-tool-get-projects (args)
-  "get_projects (deprecated): project nodes, optional status / stale filter."
-  (let* ((orsb-stale-days (orsb-arg-int args 'days_threshold orsb-stale-days))
-         (records (orsb-tools--list (append `((node_type . "project") (limit . 500)) args))))
-    `((total . ,(length records)) (stale_days . ,orsb-stale-days)
-      (projects . ,(orsb--vector
-                    (mapcar (lambda (r) (if (assq 'next_action r) r (append r '((next_action))))) records))))))
 
 (defun orsb-tool-find-related (args)
   "find_related: notes close in meaning to a note (or to some text)."
@@ -677,17 +650,6 @@ checks titles and aliases only."
                                            :tags (orsb-arg-list args 'tags)
                                            :properties (orsb-arg-props args 'properties)))))
              (append '((created . t)) (orsb-tools--full-record node nil))))))))))
-
-(defun orsb-tool-add-heading (args)
-  "add_heading (deprecated: create_node with parent_id)."
-  (orsb-require args 'id 'heading)
-  (let* ((parent (orsb-core-resolve (orsb-arg args 'id)))
-         (todo (orsb-arg args 'todo))
-         (heading (if todo (concat (upcase todo) " " (orsb-arg args 'heading)) (orsb-arg args 'heading)))
-         (node (orsb-core-add-heading parent heading (orsb-arg args 'body)
-                                      (orsb-arg-props args 'properties)
-                                      (orsb-arg-int args 'level 1))))
-    (orsb-tools--full-record node nil)))
 
 (defun orsb-tools--child-heading (node heading)
   "The heading titled HEADING inside NODE, as a node.\nThe heading gets an :ID: first if it has none."
@@ -964,11 +926,6 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
          `((file . ,(orsb-tools--relative path)) (title . ,(orsb-arg args 'title))
            (date . ,(or date (format-time-string "%Y-%m-%d")))))))))
 
-(defun orsb-tool-get-daily (args)
-  "get_daily {date} (deprecated: get_node with id \"today\" or a date)."
-  `((date . ,(or (orsb-arg args 'date) (format-time-string "%Y-%m-%d")))
-    (content . ,(orsb-core-daily-content (orsb-arg args 'date)))))
-
 (defun orsb-tool-log-to-inbox (args)
   "log_to_inbox {text, linked_id, category}."
   (orsb-require args 'text)
@@ -996,38 +953,6 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
        (let ((e (orsb-core-resolve-inbox (orsb-arg args 'ref) target (orsb-arg args 'section))))
          `((ref . ,(plist-get e :ref)) (text . ,(plist-get e :text)) (resolved . t)
            ,@(when target `((filed_to . ,(orsb-tools--ref target))))))))))
-
-(defun orsb-tool-get-followups (args)
-  "get_followups {dangling} (deprecated: get_review)."
-  (if (orsb-arg-bool args 'dangling)
-      (let ((items (orsb-core-dangling-followups)))
-        `((total . ,(length items))
-          (untracked_people . ,(orsb--vector
-                                (mapcar (lambda (p) `((name . ,(plist-get p :name)) (item . ,(plist-get p :item))
-                                                      (file . ,(orsb-tools--relative (plist-get p :file)))))
-                                        items)))))
-    (let ((people (orsb-core-followups)))
-      `((total . ,(length people))
-        (people . ,(orsb--vector
-                    (mapcar (lambda (p)
-                              (append (orsb-tools--light-record (plist-get p :node))
-                                      `((pending_followups . ,(orsb--vector (plist-get p :followups)))
-                                        (followup_count . ,(length (plist-get p :followups))))))
-                            people)))))))
-
-(defun orsb-tool-get-digest (args)
-  "get_digest {days} (deprecated: get_review)."
-  (let* ((projects (orsb-tool-get-projects '((status . "active"))))
-         (stale (orsb-tool-get-projects '((stale . t))))
-         (followups (orsb-tool-get-followups nil))
-         (dangling (orsb-tool-get-followups '((dangling . t))))
-         (inbox (orsb-core-inbox-entries (orsb-arg-int args 'days 7))))
-    `((generated_at . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
-      (active_projects . ,projects)
-      (stale_projects . ,stale)
-      (pending_followups . ,followups)
-      (dangling_followups . ,dangling)
-      (inbox . ,(orsb--vector (mapcar (lambda (d) `((date . ,(car d)) (entries . ,(orsb--vector (cdr d))))) inbox))))))
 
 (defun orsb-tool-get-review (args)
   "get_review: what needs attention, each list capped, with totals."
@@ -1097,61 +1022,10 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
           ,@(if dry `((dry_run . t) (would_change . ,(orsb--vector (cdr r))))
               `((change_id . ,(cdr r)))))))))
 
-(defun orsb-tool-get-blog-status (_args)
-  "get_blog_status."
-  (let ((s (orsb-core-blog-status)))
-    `((drafts . ((total . ,(length (plist-get s :drafts)))
-                 (items . ,(orsb--vector
-                            (mapcar (lambda (d)
-                                      (append (orsb-tools--light-record (plist-get d :node))
-                                              `((sections_written . ,(car (plist-get d :outline)))
-                                                (sections . ,(cdr (plist-get d :outline))))))
-                                    (plist-get s :drafts))))))
-      (published . ((total . ,(length (plist-get s :published)))
-                    (recent . ,(orsb--vector (mapcar #'orsb-tools--light-record (plist-get s :published))))))
-      (ideas_for_blog . ((total . ,(length (plist-get s :ideas)))
-                         (items . ,(orsb--vector (mapcar #'orsb-tools--light-record (plist-get s :ideas)))))))))
-
-(defun orsb-tool-sync (args)
-  "sync {id, embeddings, full, wait}.
-With id: update that note's db row now (and its embeddings if asked).
-Otherwise a full scan is queued for idle time so the request path stays
-responsive; wait=true runs it synchronously instead.  full=true forces a
-rebuild (the only remedy when the db and the files disagree)."
-  (let ((id (orsb-arg args 'id))
-        (embeddings (orsb-arg-bool args 'embeddings))
-        (full (orsb-arg-bool args 'full))
-        (wait (orsb-arg-bool args 'wait)))
-    (when (and embeddings (not (fboundp 'orsb-search-generate-file)))
-      (orsb-error 'unavailable "Embedding generation is not loaded (orsb-search)"))
-    (cond
-     (id (let* ((node (orsb-core-resolve id))
-                (file (org-roam-node-file node)))
-           (org-roam-db-update-file file)
-           (let ((done (when embeddings (orsb-search-generate-file file full))))
-             `((synced . ,(orsb-tools--relative file))
-               (embeddings . ,(if embeddings t :json-false))
-               (generated . ,(or (car done) 0))
-               (skipped . ,(or (cdr done) 0))))))
-     (t
-      (let ((work (lambda ()
-                    (if full (org-roam-db-sync 'force) (org-roam-db-sync))
-                    (when embeddings
-                      ;; queue every note; the worker skips chunks whose
-                      ;; cached hash still matches, so this is cheap
-                      (dolist (f (org-roam-list-files)) (orsb-search-enqueue f))))))
-        (if wait
-            (progn (funcall work)
-                   `((synced . "db") (full . ,(if full t :json-false)) (embeddings . ,(if embeddings t :json-false))))
-          (run-with-idle-timer 1 nil work)
-          `((queued . t) (full . ,(if full t :json-false)) (embeddings . ,(if embeddings t :json-false))
-            (what . "database scan (and embeddings if asked) runs when Emacs is idle; pass wait=true to block"))))))))
-
 (defun orsb-tool-get-schema (_args)
   "get_schema: the vocabulary this server enforces."
   (let ((todo (orsb-core--todo-sets)))
     `((version . ,orsb-tools-version)
-      (tool_profile . ,(symbol-name orsb-mcp-tool-profile))
       (id_forms . ["org-roam id" "path relative to the vault, or absolute" "exact title or alias"
                    "\"today\", \"yesterday\" or YYYY-MM-DD for a daily note"])
       (node_types . ,(orsb--vector (mapcar (lambda (c) `((type . ,(car c)) (directory . ,(cdr c)))) orsb-directories)))
@@ -1169,7 +1043,6 @@ rebuild (the only remedy when the db and the files disagree)."
       (inbox_heading . ,orsb-inbox-heading)
       (hugo_sections . ,(orsb--vector orsb-hugo-sections))
       (blog_enabled . ,(if orsb-hugo-base-dir t :json-false))
-      (legacy_tools . ,(if orsb-mcp-legacy-tools t :json-false))
       (envelope . "{ok:true,data} | {ok:false,error:{code,message,hint}} with isError")
       (undo . "Every write returns change_id; restore with that id puts the files back. dry_run:true previews a write without making it."))))
 
@@ -1394,277 +1267,7 @@ rebuild (the only remedy when the db and the files disagree)."
     ("get_schema" orsb-tool-get-schema
      "The vocabulary this server enforces: note types, status values, TODO keywords, tags in use, id forms. Call this instead of guessing."
      () ()))
-  "The small-model profile: (NAME FUNCTION DESCRIPTION REQUIRED SCHEMA).")
-
-(defconst orsb-tools--full-extras
-  `(("get_blog_status" orsb-tool-get-blog-status
-     "Blog overview: drafts with how many sections have text, recent published posts, ideas that could become posts."
-     () ())
-    ("sync" orsb-tool-sync
-     "Bring the database (and optionally embeddings) up to date: id for one note; otherwise a scan queued for idle time (wait=true blocks; full=true forces a rebuild)."
-     ()
-     ((id . ((type . "string")))
-      (embeddings . ((type . "boolean") (default . :json-false)))
-      (full . ((type . "boolean") (default . :json-false)))
-      (wait . ((type . "boolean") (default . :json-false)))))
-    ("get_graph" orsb-tool-get-graph
-     "The whole graph in one call, for drawing it: every node (file or heading) with id, title, vault-relative file, level, pos (character position in the file) and tags, and every id link as a [source, dest] pair. Reads the database only; no bodies."
-     ()
-     ()))
-  "Tools added when `orsb-mcp-tool-profile' is `full'.")
-
-(defconst orsb-tools--deprecated
-  `(("add_heading" orsb-tool-add-heading "create_node with parent_id"
-     ("id" "heading")
-     (,orsb-tools--id-schema
-      (heading . ((type . "string")))
-      (body . ((type . "string")))
-      (properties . ((type . "object")))
-      (level . ((type . "integer") (default . 1)))
-      (todo . ((type . "string")))))
-    ("get_daily" orsb-tool-get-daily "get_node with id \"today\" or a date"
-     () ((date . ((type . "string")))))
-    ("get_projects" orsb-tool-get-projects "list_nodes with node_type project"
-     () ((status . ((type . "string"))) (stale . ((type . "boolean"))) (days_threshold . ((type . "integer")))))
-    ("get_followups" orsb-tool-get-followups "get_review"
-     () ((dangling . ((type . "boolean")))))
-    ("get_digest" orsb-tool-get-digest "get_review"
-     () ((days . ((type . "integer"))))))
-  "2.0 tools folded into others in 2.1.
-Each is (NAME FUNCTION REPLACEMENT REQUIRED SCHEMA).  They are
-registered, marked deprecated, while `orsb-mcp-legacy-tools' is non-nil.")
-
-(defun orsb-tools--active-definitions ()
-  "The tool definitions the current `orsb-mcp-tool-profile' registers."
-  (append orsb-tools--definitions
-          (when (eq orsb-mcp-tool-profile 'full) orsb-tools--full-extras)))
-
-(defun orsb-tools-function (name)
-  "The implementation function of tool NAME (current, full-profile or deprecated)."
-  (or (nth 1 (assoc name orsb-tools--definitions))
-      (nth 1 (assoc name orsb-tools--full-extras))
-      (nth 1 (assoc name orsb-tools--deprecated))
-      (error "No such tool: %s" name)))
-
-;;;; Legacy names (pre-2.0): argument mappers, old response shape
-
-(defun orsb-legacy--data (name args)
-  "Run 2.0 tool NAME on ARGS; return its data or signal the error."
-  (let ((r (orsb-tools--run (orsb-tools-function name) args)))
-    (if (eq (car r) :ok) (nth 1 r)
-      (orsb-error (nth 1 r) "%s" (nth 2 r)))))
-
-(defun orsb-legacy--ok (&rest fields)
-  "A legacy success alist with FIELDS (an alist) merged in."
-  (append '((success . t)) (car fields)))
-
-(defun orsb-legacy--wrap (fn)
-  "Wrap legacy mapper FN so it answers in the {\"success\":...} shape."
-  (lambda (args)
-    (condition-case err
-        (json-encode (funcall fn (orsb-tools--clean-args args)))
-      (orsb-error (json-encode `((success . :json-false) (error . ,(nth 2 err)))))
-      (error (json-encode `((success . :json-false) (error . ,(error-message-string err))))))))
-
-(defun orsb-legacy--id (args &rest keys)
-  "The first of KEYS present in ARGS (the old identifier spellings)."
-  (seq-some (lambda (k) (orsb-arg args k)) keys))
-
-(defun orsb-legacy--search (mode)
-  "Mapper for the old search tools in MODE.
-The old semantic_search returned each note's full text; callers that fed
-that to an LLM (blog_draft) get a cleaned `excerpt' of up to 1500
-characters instead of the 240-character snippet."
-  (lambda (args)
-    (let ((d (orsb-legacy--data "search" (append `((mode . ,mode)) args))))
-      (orsb-legacy--ok
-       `((query . ,(alist-get 'query d)) (total_found . ,(alist-get 'total d))
-         (notes . ,(orsb--vector
-                    (mapcar (lambda (h)
-                              (let ((node (ignore-errors (org-roam-node-from-id (alist-get 'id h)))))
-                                `((id . ,(alist-get 'id h)) (title . ,(alist-get 'title h))
-                                  (file . ,(alist-get 'file h)) (node_type . ,(alist-get 'node_type h))
-                                  (status . ,(alist-get 'status h))
-                                  (similarity_score . ,(alist-get 'score h))
-                                  (snippet . ,(alist-get 'snippet h))
-                                  (excerpt . ,(if node (orsb-tools--snippet node 1500) (alist-get 'snippet h))))))
-                            (alist-get 'hits d)))))))))
-
-(defun orsb-legacy--create (type)
-  "Mapper for the old create_* tools of TYPE."
-  (lambda (args)
-    (let* ((title (or (orsb-arg args 'title) (orsb-arg args 'name)))
-           (body (or (orsb-arg args 'notes) (orsb-arg args 'body) (orsb-arg args 'elaboration)))
-           (d (orsb-legacy--data "create_node"
-                                 `((node_type . ,type) (title . ,title) (body . ,body)
-                                   (status . ,(orsb-arg args 'status))
-                                   (next_action . ,(orsb-arg args 'next_action))
-                                   (context . ,(orsb-arg args 'context))
-                                   (follow_ups . ,(alist-get 'follow_ups args))
-                                   (one_liner . ,(orsb-arg args 'one_liner))
-                                   (due_date . ,(orsb-arg args 'due_date))
-                                   (hugo_section . ,(orsb-arg args 'section))
-                                   (tags . ,(alist-get 'tags args))))))
-      (orsb-legacy--ok
-       `((message . ,(format "%s note created" type))
-         (note_id . ,(alist-get 'id d)) (id . ,(alist-get 'id d))
-         (file . ,(alist-get 'file d)) (title . ,(alist-get 'title d))
-         (node . ,(orsb--object d)))))))
-
-(defconst orsb-tools--legacy
-  `(("search_notes" "search" ,(orsb-legacy--search "title"))
-    ("contextual_search" "search" ,(orsb-legacy--search "contextual"))
-    ("semantic_search" "search" ,(orsb-legacy--search "semantic"))
-    ("read_note" "get_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_node" `((id . ,(orsb-legacy--id args 'identifier 'id)) (section . ,(orsb-arg args 'section))))))
-          (orsb-legacy--ok `((file . ,(alist-get 'file d)) (id . ,(alist-get 'id d)) (title . ,(alist-get 'title d))
-                             (properties . ,(alist-get 'properties d)) (content . ,(alist-get 'body d)))))))
-    ("read_node" "get_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_node" `((id . ,(orsb-legacy--id args 'node_id 'id))))))
-          (orsb-legacy--ok `((node_id . ,(alist-get 'id d)) (title . ,(alist-get 'title d)) (file . ,(alist-get 'file d))
-                             (level . ,(alist-get 'level d)) (text . ,(alist-get 'body d))
-                             (properties . ,(alist-get 'properties d)) (keywords . ,(alist-get 'keywords d)))))))
-    ("get_note_properties" "get_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_node" `((id . ,(orsb-legacy--id args 'identifier 'id)) (include_body . :json-false)))))
-          (orsb-legacy--ok `((file . ,(alist-get 'file d)) (id . ,(alist-get 'id d)) (title . ,(alist-get 'title d))
-                             (status . ,(alist-get 'status d)) (node_type . ,(alist-get 'node_type d))
-                             (properties . ,(alist-get 'properties d)) (tags . ,(alist-get 'tags d))
-                             (links_to . ,(orsb--vector (mapcar (lambda (l) (alist-get 'id l)) (alist-get 'links_to d))))
-                             (links_from . ,(orsb--vector (mapcar (lambda (l) (alist-get 'id l)) (alist-get 'links_from d)))))))))
-    ("list_notes" "list_nodes"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "list_nodes" (if (equal (orsb-arg args 'status) "stale")
-                                                     (append '((stale . t)) (assq-delete-all 'status (copy-alist args)))
-                                                   args))))
-          (orsb-legacy--ok `((total . ,(alist-get 'total d)) (notes . ,(alist-get 'nodes d)))))))
-    ("get_active_projects" "get_projects"
-     ,(lambda (_args)
-        (let ((d (orsb-legacy--data "get_projects" '((status . "active")))))
-          (orsb-legacy--ok `((total . ,(alist-get 'total d)) (projects . ,(alist-get 'projects d)))))))
-    ("get_stale_projects" "get_projects"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_projects" `((stale . t) (days_threshold . ,(alist-get 'days_threshold args))))))
-          (orsb-legacy--ok `((total . ,(alist-get 'total d)) (projects . ,(alist-get 'projects d)))))))
-    ("create_note" "create_node" ,(orsb-legacy--create "note"))
-    ("create_project" "create_node" ,(orsb-legacy--create "project"))
-    ("create_person" "create_node" ,(orsb-legacy--create "person"))
-    ("create_idea" "create_node" ,(orsb-legacy--create "idea"))
-    ("create_admin" "create_node" ,(orsb-legacy--create "admin"))
-    ("create_blog_post" "create_node" ,(orsb-legacy--create "blog"))
-    ("add_node" "add_heading"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "add_heading" `((id . ,(orsb-legacy--id args 'note_id 'id)) (heading . ,(orsb-arg args 'heading))
-                                                    (body . ,(orsb-arg args 'text)) (properties . ,(alist-get 'properties args))
-                                                    (level . ,(alist-get 'level args))))))
-          (orsb-legacy--ok `((node_id . ,(alist-get 'id d)) (file . ,(alist-get 'file d)) (heading . ,(alist-get 'title d)) (level . ,(alist-get 'level d)))))))
-    ("update_node" "set_node / update_body"
-     ,(lambda (args)
-        (let ((id (orsb-legacy--id args 'node_id 'id))
-              (text (or (orsb-arg args 'text) (orsb-arg args 'content)))
-              (section (orsb-arg args 'section))
-              (props (alist-get 'properties args)))
-          (when props (orsb-legacy--data "set_node" `((id . ,id) (properties . ,props))))
-          (when text (orsb-legacy--data "update_body" `((id . ,id) (content . ,text) (section . ,section) (mode . "replace")
-                                                        (create_section . t))))
-          (let ((d (orsb-legacy--data "get_node" `((id . ,id) (include_body . :json-false)))))
-            (orsb-legacy--ok `((node_id . ,(alist-get 'id d)) (file . ,(alist-get 'file d)) (properties . ,(alist-get 'properties d))))))))
-    ("update_note" "update_body"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "update_body" `((id . ,(orsb-legacy--id args 'identifier 'id)) (content . ,(orsb-arg args 'content))
-                                                    (section . ,(orsb-arg args 'section)) (mode . ,(or (orsb-arg args 'mode) "append"))
-                                                    (create_section . t) (force . ,(alist-get 'force args))))))
-          (orsb-legacy--ok `((file . ,(alist-get 'file d)) (mode . ,(alist-get 'mode d)) (section . ,(alist-get 'section d)))))))
-    ("manage_tags" "set_node"
-     ,(lambda (args)
-        (let* ((action (orsb-arg args 'action))
-               (key (if (equal action "remove") 'tags_remove 'tags_add))
-               (d (orsb-legacy--data "set_node" `((id . ,(orsb-legacy--id args 'identifier 'id)) (,key . ,(vector (orsb-arg args 'tag)))))))
-          (orsb-legacy--ok `((file . ,(alist-get 'file d)) (action . ,action) (tag . ,(orsb-arg args 'tag)) (tags . ,(alist-get 'tags d)))))))
-    ("rename_note" "set_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "set_node" `((id . ,(orsb-legacy--id args 'identifier 'id)) (title . ,(orsb-arg args 'new_title))))))
-          (orsb-legacy--ok `((file . ,(alist-get 'file d)) (new_title . ,(alist-get 'title d)))))))
-    ("change_task_state" "set_node"
-     ,(lambda (args)
-        ;; old contract: file + heading text; find the heading node in that file
-        (let* ((file (orsb-arg args 'file))
-               (heading (orsb-arg args 'heading))
-               (node (or (seq-find (lambda (n) (and (equal (org-roam-node-file n) (expand-file-name file org-roam-directory))
-                                                    (> (org-roam-node-level n) 0)
-                                                    (orsb-core-string= (org-roam-node-title n) heading)))
-                                   (org-roam-node-list))
-                         (orsb-error 'not-found "No heading %S in %s" heading file)))
-               (d (orsb-legacy--data "set_node" `((id . ,(org-roam-node-id node)) (todo . ,(orsb-arg args 'new_state))))))
-          (orsb-legacy--ok `((message . ,(format "Changed %S to %s" heading (alist-get 'todo d))))))))
-    ("delete_note" "delete_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "delete_node" `((id . ,(orsb-legacy--id args 'identifier 'id)) (archive . ,(alist-get 'archive args))))))
-          (orsb-legacy--ok `((action . ,(alist-get 'action d)) (file . ,(alist-get 'file d)))))))
-    ("delete_node" "delete_node"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "delete_node" `((id . ,(orsb-legacy--id args 'node_id 'id))))))
-          (orsb-legacy--ok `((node_id . ,(alist-get 'id d)) (file . ,(alist-get 'file d)))))))
-    ("add_link" "link_nodes"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "link_nodes" `((id . ,(orsb-arg args 'from_id)) (target_id . ,(orsb-arg args 'to_id)) (section . ,(orsb-arg args 'section))))))
-          (orsb-legacy--ok `((from . ,(alist-get 'id d)) (to . ,(alist-get 'target_id d)) (to_title . ,(alist-get 'target_title d)))))))
-    ("add_daily_entry" "add_daily_entry"
-     ,(lambda (args)
-        (orsb-legacy--data "add_daily_entry" args)
-        (orsb-legacy--ok `((message . ,(format "Added journal entry: %s" (orsb-arg args 'title)))))))
-    ("get_daily_content" "get_daily"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_daily" args)))
-          (orsb-legacy--ok `((content . ,(alist-get 'content d)))))))
-    ("log_to_inbox" "log_to_inbox"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "log_to_inbox" `((text . ,(orsb-arg args 'text))))))
-          (orsb-legacy--ok `((logged . ,(orsb-arg args 'text)) (created_people . ,(alist-get 'created_people d)))))))
-    ("add_inbox_entry" "log_to_inbox"
-     ,(lambda (args)
-        (orsb-legacy--data "log_to_inbox" `((text . ,(orsb-arg args 'original_text)) (category . ,(orsb-arg args 'command))
-                                            (linked_id . ,(orsb-arg args 'linked_note_id))))
-        (orsb-legacy--ok `((message . "Inbox entry added") (command . ,(orsb-arg args 'command))))))
-    ("get_digest_data" "get_digest"
-     ,(lambda (_args)
-        (let ((d (orsb-legacy--data "get_digest" nil)))
-          (orsb-legacy--ok `((generated_at . ,(alist-get 'generated_at d))
-                             (active_projects . ,(alist-get 'active_projects d))
-                             (pending_followups . ,(alist-get 'pending_followups d))
-                             (stale_projects . ,(alist-get 'stale_projects d)))))))
-    ("get_weekly_inbox" "get_digest"
-     ,(lambda (args)
-        (let ((d (orsb-legacy--data "get_digest" `((days . ,(alist-get 'days args))))))
-          (orsb-legacy--ok `((by_day . ,(alist-get 'inbox d)))))))
-    ("get_pending_followups" "get_followups"
-     ,(lambda (_args) (orsb-legacy--ok (orsb-legacy--data "get_followups" nil))))
-    ("get_dangling_followups" "get_followups"
-     ,(lambda (_args) (orsb-legacy--ok (orsb-legacy--data "get_followups" '((dangling . t))))))
-    ("blog_status" "get_blog_status"
-     ,(lambda (_args) (orsb-legacy--ok (orsb-legacy--data "get_blog_status" nil))))
-    ("sync_database" "sync"
-     ,(lambda (_args) (orsb-legacy--data "sync" '((wait . t))) (orsb-legacy--ok '((message . "Database synced")))))
-    ("generate_note_embedding" "sync"
-     ,(lambda (args)
-        (let ((node (orsb-core-resolve (or (orsb-arg args 'file_path) (orsb-arg args 'id)))))
-          (orsb-legacy--data "sync" `((id . ,(org-roam-node-id node)) (embeddings . t)))
-          (orsb-legacy--ok `((message . ,(format "Embedding generated for %s" (org-roam-node-file node))))))))
-    ("generate_embeddings" "sync"
-     ,(lambda (_args) (orsb-legacy--data "sync" '((embeddings . t))) (orsb-legacy--ok '((message . "Batch embedding generation queued"))))))
-  "Legacy tools: (OLD-NAME REPLACEMENT MAPPER).  MAPPER takes the decoded
-args and returns the legacy response alist, calling the 2.0 tools.")
-
-(defun orsb-tools-legacy-name-p (name)
-  "Whether NAME is registered as a legacy (pre-2.0) tool, i.e. answers in the
-old {\"success\": ...} shape."
-  (and (assoc name orsb-tools--legacy)
-       (not (assoc name orsb-tools--definitions))
-       (not (assoc name orsb-tools--full-extras))
-       (not (assoc name orsb-tools--deprecated))
-       t))
+  "The tools: (NAME FUNCTION DESCRIPTION REQUIRED SCHEMA).")
 
 (defun orsb-tools--register-def (name fn desc required schema)
   "Register tool NAME running FN with DESC, REQUIRED args and SCHEMA."
@@ -1676,31 +1279,11 @@ old {\"success\": ...} shape."
    schema))
 
 (defun orsb-tools-register ()
-  "Register the tools of `orsb-mcp-tool-profile'.
-With `orsb-mcp-legacy-tools', the deprecated names are registered too."
+  "Register the tools (`orsb-tools--definitions')."
   (clrhash org-roam-mcp-http--tools)
-  (dolist (def (orsb-tools--active-definitions))
+  (dolist (def orsb-tools--definitions)
     (apply #'orsb-tools--register-def def))
-  (when orsb-mcp-legacy-tools
-    (dolist (def orsb-tools--deprecated)
-      (pcase-let ((`(,name ,fn ,replacement ,required ,schema) def))
-        (unless (gethash name org-roam-mcp-http--tools)
-          (orsb-tools--register-def name fn (format "[deprecated → %s] Kept for compatibility; see MIGRATION.md." replacement)
-                                    required schema))))
-    (dolist (entry orsb-tools--legacy)
-      (pcase-let ((`(,old ,new ,mapper) entry))
-        ;; A name the current set also uses (add_daily_entry, log_to_inbox,
-        ;; delete_node) keeps the current implementation, which accepts
-        ;; the old arguments as well.
-        (unless (gethash old org-roam-mcp-http--tools)
-          (org-roam-mcp-http--register-tool
-           old (format "[deprecated → %s] Old name kept for compatibility; see MIGRATION.md." new)
-           (orsb-legacy--wrap mapper)
-           nil nil nil)))))
-  (message "orsb-tools: %d tools registered (%s profile, %s deprecated names)"
-           (hash-table-count org-roam-mcp-http--tools)
-           orsb-mcp-tool-profile
-           (if orsb-mcp-legacy-tools "with" "without")))
+  (message "orsb-tools: %d tools registered" (hash-table-count org-roam-mcp-http--tools)))
 
 ;;;; Status migration
 

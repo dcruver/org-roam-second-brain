@@ -78,7 +78,6 @@ Useful options:
 | `--extra-body '{"top_p":0.9}'` | extra request fields your server understands |
 | `--system-prompt my.txt` | your own system prompt; `{today}` is filled in |
 | `--no-server-instructions` | leave out the guidance the MCP server sends at startup |
-| `--profile full` | offer the full tool profile (adds `sync`, `get_blog_status`) |
 | `--embed-url http://localhost:11434/v1 --embed-model nomic-embed-text --embed-dims 768` | use your real embedding model for semantic search |
 | `--no-embeddings` | no semantic search at all |
 | `--keep-vaults` | keep each run's vault so you can open it in Emacs |

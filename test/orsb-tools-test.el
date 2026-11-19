@@ -3,7 +3,7 @@
 ;;; Commentary:
 ;; Drives tools through `org-roam-mcp-http--handle-tools-call', i.e. the same
 ;; path an MCP client takes, and checks the {ok,data|error} envelope, the
-;; isError flag, the shared `id' parameter, and the legacy deprecation.
+;; isError flag and the shared `id' parameter.
 
 ;;; Code:
 
@@ -19,15 +19,6 @@
   (unless (and (gethash "get_schema" org-roam-mcp-http--tools)
                (not (gethash "read_note" org-roam-mcp-http--tools)))
     (org-roam-mcp-http--register-all-tools)))
-
-(defmacro orsb-tools-test--with-legacy (&rest body)
-  "Run BODY with the deprecated names registered, then restore the default set."
-  (declare (indent 0))
-  `(unwind-protect
-       (let ((orsb-mcp-legacy-tools t))
-         (org-roam-mcp-http--register-all-tools)
-         ,@body)
-     (org-roam-mcp-http--register-all-tools)))
 
 (defun orsb-tools-test--call (name &rest args)
   "Call tool NAME with ARGS (a plist of symbol keys) via the JSON-RPC handler.
@@ -57,66 +48,22 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
 
 ;;;; schema and registration
 
-(ert-deftest orsb-tools-schema-and-legacy-marking ()
+(ert-deftest orsb-tools-schema-and-the-one-tool-set ()
   (orsb-test-with-vault
     (let ((schema (orsb-tools-test--data "get_schema")))
       (should (member "waiting" (alist-get 'status_values schema)))
       (should (equal (alist-get 'stale_days schema) orsb-stale-days))
       (should (equal (cdr (assq 'completed (alist-get 'status_aliases schema))) "done")))
-    ;; the small profile: exactly these nineteen, nothing deprecated
+    ;; exactly these nineteen: no old names, no profiles
     (orsb-tools-test--ensure-registered)
     (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
                    "set_checkbox" "get_tasks" "link_nodes" "move_node" "merge_nodes" "delete_node"
                    "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema")))
       (dolist (name names) (should (gethash name org-roam-mcp-http--tools)))
       (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
-    (should-not (gethash "read_node" org-roam-mcp-http--tools))
-    (should-not (gethash "add_heading" org-roam-mcp-http--tools))
-    ;; the full profile adds three
-    (unwind-protect
-        (let ((orsb-mcp-tool-profile 'full))
-          (org-roam-mcp-http--register-all-tools)
-          (should (gethash "sync" org-roam-mcp-http--tools))
-          (should (gethash "get_blog_status" org-roam-mcp-http--tools))
-          (should (gethash "get_graph" org-roam-mcp-http--tools))
-          (should (= (hash-table-count org-roam-mcp-http--tools) 22)))
-      (org-roam-mcp-http--register-all-tools))
-    ;; deprecated names only behind the flag
-    (orsb-tools-test--with-legacy
-      (should (string-prefix-p "[deprecated → create_node with parent_id]"
-                               (org-roam-mcp-tool-description (gethash "add_heading" org-roam-mcp-http--tools))))
-      (should (string-prefix-p "[deprecated → get_node]"
-                               (org-roam-mcp-tool-description (gethash "read_node" org-roam-mcp-http--tools))))
-      (should (string-prefix-p "[deprecated → set_node / update_body]"
-                               (org-roam-mcp-tool-description (gethash "update_node" org-roam-mcp-http--tools)))))))
-
-;;;; get_graph (full profile)
-
-(ert-deftest orsb-tools-get-graph ()
-  (orsb-test-with-vault
-    (unwind-protect
-        (let ((orsb-mcp-tool-profile 'full))
-          (org-roam-mcp-http--register-all-tools)
-          (let* ((other (alist-get 'id (orsb-tools-test--data "create_node" 'node_type "note" 'title "Graph target")))
-                 (_ (orsb-tools-test--data "link_nodes" 'id "1784854105" 'target_id other))
-                 (g (orsb-tools-test--data "get_graph"))
-                 (nodes (append (alist-get 'nodes g) nil))
-                 (links (append (alist-get 'links g) nil))
-                 (ids (mapcar (lambda (n) (alist-get 'id n)) nodes))
-                 (hub (seq-find (lambda (n) (equal (alist-get 'id n) "1784854105")) nodes)))
-            (should (= (length nodes) (caar (org-roam-db-query [:select (funcall count id) :from nodes]))))
-            (should hub)
-            (should (equal (alist-get 'title hub) "Project Backlog"))
-            (should (equal (alist-get 'file hub) "projects/project-backlog-1784854105.org"))
-            (should (equal (alist-get 'level hub) 0))
-            (should (integerp (alist-get 'pos hub)))
-            (should (equal (alist-get 'tags hub) '("backlog")))
-            ;; The source is the node enclosing the link: a heading of the hub, not the file.
-            (should (seq-find (lambda (l) (equal (elt l 1) other)) links))
-            (dolist (l links)
-              (should (= (length l) 2))
-              (should (member (elt l 0) ids)))))
-      (org-roam-mcp-http--register-all-tools))))
+    (dolist (gone '("read_note" "read_node" "semantic_search" "create_blog_post" "blog_status" "update_node"
+                    "add_heading" "get_projects" "get_digest" "get_blog_status" "sync" "get_graph"))
+      (should-not (gethash gone org-roam-mcp-http--tools)))))
 
 ;;;; get_node / set_node
 
@@ -192,7 +139,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
 
 ;;;; listing and search
 
-(ert-deftest orsb-tools-list-and-projects ()
+(ert-deftest orsb-tools-list-nodes ()
   (orsb-test-with-vault
     (let ((all (orsb-tools-test--data "list_nodes")))
       (should (= (alist-get 'total all) 2))
@@ -206,12 +153,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'next_action (car (alist-get 'nodes p))) "Phase 4 status curation.")))
     (let ((page (orsb-tools-test--data "list_nodes" 'limit 1)))
       (should (= (alist-get 'returned page) 1))
-      (should (= (alist-get 'next_offset page) 1)))
-    (orsb-tools-test--with-legacy
-      (let ((p (orsb-tools-test--data "get_projects")))
-        (should (equal (alist-get 'next_action (car (alist-get 'projects p))) "Phase 4 status curation.")))
-      (let ((orsb-stale-days 0))
-        (should (= (alist-get 'total (orsb-tools-test--data "get_projects" 'stale t 'days_threshold 0)) 1))))))
+      (should (= (alist-get 'next_offset page) 1)))))
 
 (ert-deftest orsb-tools-search-title-and-contextual ()
   (orsb-test-with-vault
@@ -258,9 +200,9 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'code (orsb-tools-test--error "get_node" 'id id)) "not_found")))
     (should (equal (alist-get 'code (orsb-tools-test--error "create_node" 'node_type "widget" 'title "x")) "invalid_argument"))))
 
-;;;; daily / inbox / sync
+;;;; daily / inbox
 
-(ert-deftest orsb-tools-daily-inbox-sync ()
+(ert-deftest orsb-tools-daily-inbox ()
   (orsb-test-with-vault
     (let ((org-roam-dailies-directory "daily/"))
       (orsb-tools-test--data "add_daily_entry" 'title "Kai did a thing" 'points ["one" "two"] 'tags ["kai"])
@@ -268,14 +210,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
         (should (string-match-p "Kai did a thing" (alist-get 'body d)))
         (should (string-match-p "- one" (alist-get 'body d))))
       (orsb-tools-test--data "log_to_inbox" 'text "file this" 'linked_id "1784854105")
-      (should (string-match-p "file this" (alist-get 'body (orsb-tools-test--data "get_node" 'id "today")))))
-    (unwind-protect
-        (let ((orsb-mcp-tool-profile 'full))
-          (org-roam-mcp-http--register-all-tools)
-          (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'id "1784854105")) "projects/project-backlog-1784854105.org"))
-          (should (eq (alist-get 'queued (orsb-tools-test--data "sync")) t))
-          (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'wait t 'full t)) "db")))
-      (org-roam-mcp-http--register-all-tools))))
+      (should (string-match-p "file this" (alist-get 'body (orsb-tools-test--data "get_node" 'id "today")))))))
 
 ;;;; missing args: JSON-RPC -32602 before dispatch
 
@@ -284,47 +219,6 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (orsb-tools-test--ensure-registered)
     (let ((rpc (orsb-test--json (org-roam-mcp-http--handle-tools-call '((name . "get_node") (arguments . ()))))))
       (should (= (alist-get 'code (alist-get 'error rpc)) -32602)))))
-
-;;;; legacy names: argument mappers, old response shape
-
-(ert-deftest orsb-tools-legacy-names-map-onto-the-contract ()
-  (orsb-test-with-vault
-   (orsb-tools-test--with-legacy
-    (cl-flet ((legacy (name &rest args)
-                (let* ((arguments (let (out) (while args (push (cons (pop args) (pop args)) out)) (nreverse out)))
-                       (raw (org-roam-mcp-http--handle-tools-call `((name . ,name) (arguments . ,arguments))))
-                       (rpc (orsb-test--json raw)))
-                  (cons rpc (orsb-test--json (alist-get 'text (car (alist-get 'content (alist-get 'result rpc)))))))))
-      ;; read_note: old keys, content = body
-      (let ((r (cdr (legacy "read_note" 'identifier "Project Backlog"))))
-        (should (eq (alist-get 'success r) t))
-        (should (string-match-p "Next Actions" (alist-get 'content r))))
-      ;; get_note_properties: status from the drawer, links as id lists
-      (let ((r (cdr (legacy "get_note_properties" 'identifier "1784854105"))))
-        (should (equal (alist-get 'status r) "active"))
-        (should (equal (alist-get 'node_type r) "project")))
-      ;; update_node with properties writes the file-level drawer (the 1.x bug)
-      (let ((r (cdr (legacy "update_node" 'node_id "1784854105" 'properties '((STATUS . "done"))))))
-        (should (eq (alist-get 'success r) t))
-        (should (equal (alist-get 'STATUS (alist-get 'properties r)) "done")))
-      ;; update_note appends under a section
-      (should (eq (alist-get 'success (cdr (legacy "update_note" 'identifier "1784854105" 'content "- [ ] via legacy" 'section "Next Actions"))) t))
-      (should (string-match-p "via legacy" (orsb-test--file "projects/project-backlog-1784854105.org")))
-      ;; create_project returns the old note object
-      (let ((r (cdr (legacy "create_project" 'title "Legacy Project" 'notes "hello" 'next_action "do it"))))
-        (should (eq (alist-get 'success r) t))
-        (should (alist-get 'note_id r))
-        (should (equal (alist-get 'status (alist-get 'node r)) "active")))
-      ;; failures keep the {"success":false,"error"} shape and no isError flag
-      (let ((r (legacy "read_note" 'identifier "nope")))
-        (should (eq (alist-get 'success (cdr r)) :json-false))
-        (should (string-match-p "nope" (alist-get 'error (cdr r))))
-        (should-not (alist-get 'isError (alist-get 'result (car r)))))
-      ;; deprecated marker in the listing
-      (should (string-prefix-p "[deprecated → get_node]"
-                               (org-roam-mcp-tool-description (gethash "read_note" org-roam-mcp-http--tools))))))))
-
-;;;; status migration
 
 (ert-deftest orsb-tools-migrate-status-report-and-apply ()
   (orsb-test-with-vault

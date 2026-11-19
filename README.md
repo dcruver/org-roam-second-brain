@@ -11,7 +11,7 @@ Version 2.1 has one core and one contract, sized for small local models:
 | Module | What it is |
 |---|---|
 | `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create typed notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
-| `orsb-tools.el` | The 19-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, one status vocabulary, and an undo journal behind every write. Older tool names are available behind `orsb-mcp-legacy-tools` (see `MIGRATION.md`). |
+| `orsb-tools.el` | The 19-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, one status vocabulary, and an undo journal behind every write. `MIGRATION.md` maps the tool names of earlier versions onto these. |
 | `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
 | `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
 | `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
@@ -87,8 +87,8 @@ curl -s -X POST http://localhost:8007/mcp -H 'Content-Type: application/json' \
 
 ### Tools
 
-Nineteen tools by default (`orsb-mcp-tool-profile` is `small`). A small model
-gets fewer, clearer choices, and every error says what to do next.
+Nineteen tools, one set. A small model gets few, clear choices, and every
+error says what to do next.
 
 | Tool | Purpose |
 |---|---|
@@ -134,9 +134,6 @@ the hints). Set it to your own text, or `nil` to send none.
 Options:
 
 ```elisp
-(setq orsb-mcp-tool-profile 'full)    ; also offer sync, get_blog_status and get_graph
-                                      ; (get_graph: every node and id link, for drawing the graph)
-(setq orsb-mcp-legacy-tools t)        ; also offer the 1.x and 2.0 names, marked deprecated
 (setq orsb-duplicate-similarity 0.9)  ; create_node also flags notes close in meaning
                                       ; (one embedding call per create)
 ```

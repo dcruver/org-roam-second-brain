@@ -1,4 +1,30 @@
-# Migrating to the 2.1 MCP contract
+# Migrating to the current MCP contract
+
+## 2.1 → 2.2: one tool set
+
+2.2 removes everything that offered a second set of tools:
+
+- **The old names are gone.** `orsb-mcp-legacy-tools` no longer exists; the 1.x
+  names and the 2.0 tools that 2.1 folded into others are not registered under
+  any setting. The tables below still say what each one became, so a client can
+  be moved over call by call.
+- **Tool profiles are gone.** `orsb-mcp-tool-profile` no longer exists. There
+  are nineteen tools and no `full` profile.
+- **`sync` and `get_blog_status` are removed.** The database follows the files
+  by itself (the idle worker, and `org-roam-db-sync` from Emacs for a forced
+  refresh). For a blog overview use `list_nodes {node_type: "blog"}`: each note
+  carries its status (`idea`, `stub`, `draft`, `published`).
+- **`get_graph` is now `GET /graph`**, a plain HTTP endpoint on the same port
+  with the same `{ok, data: {nodes, links}}` answer. It was never a tool for a
+  model.
+- **Old response shape.** The 1.x names answered `{"success": ...}`. Every
+  remaining tool answers `{"ok": ..., "data" | "error"}`; a caller moving off
+  `read_note` reads `data.body` where it read `content`, and passes
+  `max_chars` when it needs more than 6,000 characters.
+
+## 2.0 → 2.1: small-model tools (historical)
+
+Written when the old names could still be switched on; they cannot since 2.2.
 
 ## 2.0 → 2.1: small-model tools
 
