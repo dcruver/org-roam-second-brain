@@ -13,7 +13,8 @@ Version 2.1 has one core and one contract, sized for small local models:
 | `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create typed notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
 | `orsb-tools.el` | The 19-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, one status vocabulary, and an undo journal behind every write. Older tool names are available behind `orsb-mcp-legacy-tools` (see `MIGRATION.md`). |
 | `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
-| `orsb-search.el` | Semantic search: chunk embeddings stored in the notes beside a content hash, an mtime-keyed index with a cache file, and an idle-time worker that re-embeds what changed. |
+| `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
+| `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
 | `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
 | `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`), capture commands, the daily digest, blog helpers. |
 | `org-agenda-project-tracking.el` | Optional agenda views and TODO journaling (`orsb-agenda-setup`). |
@@ -141,13 +142,46 @@ Options:
 
 ## Semantic search
 
-Embeddings are stored in the notes themselves (`:EMBEDDING:` next to an
-`:EMBEDDING_HASH:` of the chunk text), so they travel with the vault. Saving
-a note queues it; an idle-time worker re-embeds only the chunks whose text
-changed. Queries read an in-memory index persisted to
-`orsb-search-cache-file`. For an existing vault run
-`M-x orsb-search-backfill-hashes` once, then `sync {"embeddings": true}` or
-`M-x org-roam-semantic-generate-all-chunks`.
+Embeddings live in one SQLite file beside the notes, not in them:
+`orsb-embed-cache-file`, by default
+`~/.cache/org-roam-second-brain/embeddings.db`. Keep it outside any synced
+folder. Each row is one org-roam node (keyed by its `:ID:`) and one embedding
+model, with the hash of the text it was made from:
+
+```
+node_id       org-roam ID of the heading (or file)
+model         embedding model that made it
+content_hash  sha1 of the normalized chunk text
+dims          vector length
+vector        little-endian float32s, packed as a blob
+updated_at    when it was embedded (ISO 8601, UTC)
+```
+
+Saving a note queues it; an idle-time worker re-embeds only the chunks whose
+text changed, and writes nothing to the note except an `:ID:` the first time
+a heading is embedded (its key). Queries read an in-memory index loaded from
+the cache. Changing `org-roam-semantic-embedding-model` makes every chunk
+stale for the new model; old rows keep serving the old model until
+`M-x orsb-search-prune-cache` removes them (along with rows for nodes that no
+longer exist). The file is a cache: delete it and `sync {"embeddings": true}`
+or `M-x orsb-search-generate-all` rebuilds it.
+
+### Moving a vault off in-note embeddings
+
+Vaults from before 2.1 carry `:EMBEDDING:` and `:EMBEDDING_HASH:` lines in
+their notes. Two commands, run on the machine that runs the server:
+
+1. `M-x orsb-search-migrate-properties` copies those vectors into the cache.
+   It reads the notes and writes nothing to them; running it twice is
+   harmless. Vectors in a drawer without an `:ID:` are left for the worker to
+   re-embed.
+2. When you are happy with search, `M-x orsb-search-strip-properties` removes
+   the lines from the notes (`C-u` first for a dry run that only counts). It
+   removes a vector only when the cache holds a row for that node, and skips
+   notes with unsaved edits. This rewrites each affected note once, so let
+   Syncthing settle before editing elsewhere.
+
+Until step 2, other devices still see the old lines; nothing reads them.
 
 ## Develop
 

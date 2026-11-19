@@ -370,10 +370,12 @@ Neighbor; has a truck.
       (orsb-test--write "notes/frigate.org"
                         (format ":PROPERTIES:\n:ID: v-1\n:END:\n#+title: Frigate\n\n* Storage\n:PROPERTIES:\n:ID: v-1s\n:EMBEDDING: %s\n:END:\nRecordings go to the NAS share.\n" orsb-st--vec-a))
       (orsb-test--write "notes/nas.org"
-                        (format ":PROPERTIES:\n:ID: v-2\n:END:\n#+title: NAS\n\n* Shares\n:PROPERTIES:\n:EMBEDDING: %s\n:END:\nThe camera share holds the recordings.\n" orsb-st--vec-b))
+                        (format ":PROPERTIES:\n:ID: v-2\n:END:\n#+title: NAS\n\n* Shares\n:PROPERTIES:\n:ID: v-2s\n:EMBEDDING: %s\n:END:\nThe camera share holds the recordings.\n" orsb-st--vec-b))
       (orsb-test--write "notes/bread.org"
                         (format ":PROPERTIES:\n:ID: v-3\n:EMBEDDING: %s\n:END:\n#+title: Bread\n\nSourdough starter notes.\n" orsb-st--vec-c))
       (org-roam-db-sync)
+      ;; vectors written the old way reach search through the migration
+      (orsb-search-migrate-properties)
       (orsb-tools-test--ensure-registered)
       ;; by note: the centroid of its stored vectors, itself excluded
       (let* ((r (orsb-st--data "find_related" 'id "v-1" 'cutoff 0.5))
