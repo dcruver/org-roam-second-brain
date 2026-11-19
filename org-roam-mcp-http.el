@@ -277,7 +277,9 @@ so the HTTP layer puts it in the Mcp-Session-Id response header."
     (json-encode
      `((result . ((protocolVersion . ,version)
                   (capabilities . ((tools . ((listChanged . :json-false)))))
-                  (serverInfo . ,org-roam-mcp-http--server-info)))))))
+                  (serverInfo . ,org-roam-mcp-http--server-info)
+                  ,@(when (and (boundp 'orsb-mcp-instructions) orsb-mcp-instructions)
+                      `((instructions . ,orsb-mcp-instructions)))))))))
 
 (defun org-roam-mcp-http--handle-ping (_params)
   "Handle MCP ping request."

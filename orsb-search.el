@@ -323,22 +323,85 @@ Returns the number of hashes written."
 
 ;;;; Query
 
+(defun orsb-search-similar-vector (qv &optional limit cutoff exclude)
+  "Chunks most similar to vector QV, best first.
+At most LIMIT hits, each with score >= CUTOFF.  EXCLUDE is a list of
+files whose chunks are skipped.  Each hit is (FILE SCORE POSITION HEADING)."
+  (let ((limit (or limit 10))
+        (cutoff (or cutoff 0.0))
+        (skip (mapcar #'file-truename exclude))
+        (hits nil))
+    (dolist (file (org-roam-list-files))
+      (unless (member (file-truename file) skip)
+        (dolist (c (orsb-search--file-chunks file))
+          (let ((score (org-roam-semantic--cosine-similarity qv (nth 2 c))))
+            (when (and score (>= score cutoff))
+              (push (list file score (nth 0 c) (nth 1 c)) hits))))))
+    (seq-take (sort hits (lambda (a b) (> (cadr a) (cadr b)))) limit)))
+
 (defun orsb-search-similar (query &optional limit cutoff)
   "Chunks most similar to QUERY, best first, at most LIMIT with score >= CUTOFF.
 Each hit is (FILE SCORE POSITION HEADING), the shape of
 `org-roam-semantic-get-similar-data', but read from the index.
 Signals an error when the embedding service is unreachable."
-  (let ((limit (or limit 10))
-        (cutoff (or cutoff 0.0))
-        (qv (org-roam-ai-generate-embedding query))
-        (hits nil))
+  (let ((qv (org-roam-ai-generate-embedding query)))
     (unless qv (error "Embedding service returned nothing for the query"))
-    (dolist (file (org-roam-list-files))
-      (dolist (c (orsb-search--file-chunks file))
-        (let ((score (org-roam-semantic--cosine-similarity qv (nth 2 c))))
-          (when (and score (>= score cutoff))
-            (push (list file score (nth 0 c) (nth 1 c)) hits)))))
-    (seq-take (sort hits (lambda (a b) (> (cadr a) (cadr b)))) limit)))
+    (orsb-search-similar-vector qv limit cutoff)))
+
+(defun orsb-search-centroid (file &optional start end)
+  "The mean of FILE's stored chunk vectors, or nil when it has none.
+With START and END, only chunks whose position lies in [START, END) count."
+  (let ((vecs (delq nil (mapcar (lambda (c)
+                                  (when (or (null start)
+                                            (and (>= (nth 0 c) start) (< (nth 0 c) end)))
+                                    (nth 2 c)))
+                                (orsb-search--file-chunks file)))))
+    (when vecs
+      (let* ((n (float (length vecs)))
+             (sum (make-vector (length (car vecs)) 0.0)))
+        (dolist (v vecs)
+          (seq-do-indexed (lambda (x i) (aset sum i (+ (aref sum i) x))) v))
+        (mapcar (lambda (x) (/ x n)) sum)))))
+
+(defun orsb-search-chunk-info (file position &optional max-chars query)
+  "What the chunk at POSITION in FILE says: (:heading :id :snippet).
+POSITION 1 is the file-level chunk.  The snippet is the chunk's text
+with drawers and planning removed, at most MAX-CHARS (default 240); when
+QUERY's first word occurs in it, the snippet is taken around it."
+  (let ((max-chars (or max-chars 240)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (min position (point-max)))
+      (let (heading id text)
+        (if (looking-at "^\\*+[ \t]+\\(.*\\)$")
+            (progn
+              (setq heading (string-trim
+                             (replace-regexp-in-string
+                              "[ \t]+:[[:alnum:]_@#%:]+:[ \t]*\\'" ""
+                              (match-string-no-properties 1))))
+              (forward-line 1))
+          (goto-char (point-min)))
+        (let* ((start (point))
+               (end (save-excursion (if (re-search-forward "^\\*+[ \t]" nil t) (match-beginning 0) (point-max))))
+               (raw (buffer-substring-no-properties start end)))
+          (when (string-match "^[ \t]*:ID:[ \t]+\\(\\S-+\\)" raw)
+            (setq id (match-string 1 raw)))
+          (setq text (string-trim
+                      (replace-regexp-in-string
+                       "[ \t\n]+" " "
+                       (replace-regexp-in-string
+                        "^[ \t]*\\(?:#\\+[A-Za-z_]+:.*\\|\\(?:SCHEDULED\\|DEADLINE\\|CLOSED\\):.*\\)$" ""
+                        (replace-regexp-in-string
+                         "^[ \t]*:\\([A-Za-z_]+\\):[ \t]*\n\\(?:.*\n\\)*?[ \t]*:END:[ \t]*$" "" raw))))))
+        (when (and query (> (length text) max-chars))
+          (let* ((word (car (split-string (downcase query) "[^[:alnum:]]+" t)))
+                 (at (and word (string-search word (downcase text)))))
+            (when (and at (> at (/ max-chars 3)))
+              (setq text (concat "…" (substring text (max 0 (- at (/ max-chars 3)))))))))
+        (list :heading heading :id id
+              :snippet (if (> (length text) max-chars)
+                           (concat (substring text 0 max-chars) "…")
+                         text))))))
 
 (defun orsb-search-index-stats ()
   "Return (FILES-INDEXED . CHUNKS-INDEXED)."

@@ -1,4 +1,50 @@
-# Migrating to the 2.0 MCP contract
+# Migrating to the 2.1 MCP contract
+
+## 2.0 → 2.1: small-model tools
+
+2.1 reshapes the tool set for small local models, which have less context and
+pick tools less reliably. The full list is in the README; the changes that can
+affect an existing client:
+
+- **Old names are off by default.** `orsb-mcp-legacy-tools` now defaults to
+  `nil`. Set it to `t` to keep the 1.x names (below) and these 2.0 tools,
+  which 2.1 folded into others:
+
+  | 2.0 tool | 2.1 call |
+  |---|---|
+  | `add_heading {id, heading}` | `create_node {parent_id: id, title: heading}` (also `section`, `todo`, `scheduled`, `deadline`) |
+  | `get_daily {date}` | `get_node {id: "today"}` or `{id: "2026-11-19"}` |
+  | `get_projects {status, stale}` | `list_nodes {node_type: "project", status, stale}` (records now carry `next_action`) |
+  | `get_followups`, `get_digest` | `get_review` |
+
+- **`sync` and `get_blog_status`** are offered only with
+  `(setq orsb-mcp-tool-profile 'full)`. Nothing else changes about them.
+- **`update_body` with a `section` that does not exist** is now an error
+  listing the headings that do exist. Pass `create_section: true` for the old
+  behavior (the legacy `update_note` / `update_node` mappers still create it).
+- **`delete_node` archives a note by default.** Pass `archive: false` to delete
+  the file. A note already in the archive is deleted. Heading deletes are
+  unchanged.
+- **`create_node` refuses a title (or alias) that already exists**: it returns
+  `created: false` with `possible_duplicates`. Pass `on_duplicate: "create"`
+  for the old behavior, or `"use_existing"`. `node_type` now defaults to
+  `note`.
+- **`link_nodes`** returns `action: "exists"` (and writes nothing) when the
+  link is already there; removing a link that sits inside a sentence keeps its
+  words instead of deleting the line.
+- **`set_node {title}`** also rewrites `[[id:...][Old title]]` and `[[Old title]]`
+  link text in other notes. Pass `update_links: false` to skip that.
+- **An ambiguous title** passed as `id` is now an `invalid_argument` error
+  listing each match's id, instead of picking one.
+- **Every write answers with `change_id`**, and most take `dry_run`. `restore`
+  undoes a change. Errors carry a specific `hint` where the server knows one.
+- **Empty objects** (`properties`, `keywords`) now encode as `{}`; 2.0 sent the
+  string `"empty-object"`.
+
+New tools: `find_related`, `set_checkbox`, `get_tasks`, `move_node`,
+`merge_nodes`, `resolve_inbox`, `get_review`, `restore`.
+
+## 1.x → 2.0
 
 Since 2.0.0 the old names are thin argument mappers over the new tools (the
 `my/api-*` implementation and `org-roam-api.el` are gone), so both spellings
@@ -13,7 +59,7 @@ ones. Every tool takes the same `id` parameter (an org-roam id, a path relative
 to the vault or absolute, or an exact title/alias), returns the same envelope,
 and uses one status vocabulary. The old names keep working, marked
 `[deprecated → new]` in `tools/list`, while `orsb-mcp-legacy-tools` is non-nil
-(the default for one release). Set it to `nil` to drop them.
+(the default in 2.0; off by default since 2.1). Set it to `t` to keep them.
 
 ## Envelope
 
