@@ -44,6 +44,25 @@ affect an existing client:
 New tools: `find_related`, `set_checkbox`, `get_tasks`, `move_node`,
 `merge_nodes`, `resolve_inbox`, `get_review`, `restore`.
 
+## Embeddings move out of the notes
+
+Vectors are no longer written as `:EMBEDDING:` properties. They live in a
+SQLite file beside the notes (`orsb-embed-cache-file`, by default
+`~/.cache/org-roam-second-brain/embeddings.db`), keyed by node `:ID:` and
+embedding model; see "Semantic search" in the README. For an existing vault:
+
+1. `M-x orsb-search-migrate-properties`: copies the in-note vectors into the
+   cache without touching a note.
+2. Later, opt-in: `M-x orsb-search-strip-properties` (`C-u` for a dry run)
+   removes the in-note lines whose vectors the cache holds.
+
+Elisp changes: `orsb-search-cache-file` (the old `.eld` index) is obsolete in
+favour of `orsb-embed-cache-file`; `orsb-search-backfill-hashes` is obsolete
+and does nothing; `org-roam-semantic-get-similar-data`,
+`org-roam-semantic-generate-chunks-for-file` and
+`org-roam-semantic-generate-all-chunks` now read and write the cache. The MCP
+contract is unchanged.
+
 ## 1.x → 2.0
 
 Since 2.0.0 the old names are thin argument mappers over the new tools (the

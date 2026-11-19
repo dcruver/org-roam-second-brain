@@ -45,7 +45,6 @@
 (declare-function org-roam-ai-generate-embedding "org-roam-ai")
 (declare-function orsb-search-file-stale-p "orsb-search")
 (declare-function orsb-search-generate-file "orsb-search")
-(declare-function orsb-search-backfill-hashes "orsb-search")
 (declare-function orsb-search-enqueue "orsb-search")
 (declare-function org-roam-mcp-http--register-tool "org-roam-mcp-http")
 (defvar org-roam-mcp-http--tools)
@@ -1108,9 +1107,8 @@ rebuild (the only remedy when the db and the files disagree)."
       (let ((work (lambda ()
                     (if full (org-roam-db-sync 'force) (org-roam-db-sync))
                     (when embeddings
-                      ;; hashes first so unchanged notes are not re-embedded,
-                      ;; then queue every note for the idle worker
-                      (orsb-search-backfill-hashes)
+                      ;; queue every note; the worker skips chunks whose
+                      ;; cached hash still matches, so this is cheap
                       (dolist (f (org-roam-list-files)) (orsb-search-enqueue f))))))
         (if wait
             (progn (funcall work)

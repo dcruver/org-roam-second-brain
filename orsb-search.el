@@ -1,7 +1,7 @@
 ;;; orsb-search.el --- Semantic search with stale detection and an index -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 2.0.0
+;; Version: 2.1.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -9,26 +9,36 @@
 ;;; Commentary:
 
 ;; Builds on the embedding primitives in `org-roam-vector-search.el' (the
-;; OpenAI-compatible call, the chunk parser, the drawer writer) and adds
-;; the three things it lacked:
+;; OpenAI-compatible call, the chunk parser) and adds:
 ;;
-;; - Stale detection.  Every chunk embedding is stored next to
-;;   :EMBEDDING_HASH:, the sha1 of the normalized chunk text.  A chunk is
-;;   regenerated only when its hash changed; an edited section no longer
-;;   keeps its old vector forever.
-;; - An index.  Query time reads an in-memory table keyed by file mtime
-;;   instead of re-reading and re-parsing every note; the table is written
-;;   to `orsb-search-cache-file' when Emacs is idle so a daemon restart does
-;;   not start cold.
+;; - A cache beside the notes.  Vectors live in the SQLite file managed by
+;;   `orsb-embed-cache', keyed by the org-roam :ID: of the heading they
+;;   were made from.  Notes hold only text: re-embedding never rewrites a
+;;   .org file, so Syncthing has nothing to push and nothing to conflict.
+;;   The only note change this module still makes is giving a heading an
+;;   :ID: the first time it is embedded, so its vector has a key.
+;; - Stale detection.  Each row records the sha1 of the normalized chunk
+;;   text it was made from.  A chunk is regenerated only when its hash
+;;   changed, or when there is no row for the configured model.
+;; - An index.  Query time reads an in-memory table of node id -> vector,
+;;   loaded from the cache once, and org-roam's database for where each
+;;   node sits.  No note is read or parsed on the query path.
 ;; - A queue.  Writes (MCP tools, saves) enqueue the file; a worker runs when
 ;;   Emacs is idle and embeds one file at a time.  Nothing on the request path
 ;;   or in a save hook waits for the embedding service.
+;;
+;; Vaults whose notes still carry :EMBEDDING: properties move over with
+;; `orsb-search-migrate-properties' (copies them into the cache, touches no
+;; note) and later, as a separate opt-in step,
+;; `orsb-search-strip-properties' (removes them from the notes).
 
 ;;; Code:
 
 (require 'org)
+(require 'org-id)
 (require 'org-roam)
 (require 'org-roam-vector-search)
+(require 'orsb-embed-cache)
 (require 'seq)
 (require 'subr-x)
 
@@ -37,10 +47,7 @@
   :group 'orsb
   :prefix "orsb-search-")
 
-(defcustom orsb-search-cache-file (locate-user-emacs-file "orsb-embeddings.eld")
-  "File the embedding index is persisted to (nil disables persistence)."
-  :type '(choice (const nil) file)
-  :group 'orsb-search)
+(make-obsolete-variable 'orsb-search-cache-file 'orsb-embed-cache-file "2.1.0")
 
 (defcustom orsb-search-idle-delay 2
   "Seconds of idle time before the embedding worker takes the next queued file."
@@ -48,9 +55,15 @@
   :group 'orsb-search)
 
 (defcustom orsb-search-hash-property "EMBEDDING_HASH"
-  "Property that records which text an :EMBEDDING: was computed from."
+  "Property that recorded which text an in-note :EMBEDDING: was computed from.
+Only read by the migration from in-note vectors, and removed by
+`orsb-search-strip-properties'."
   :type 'string
   :group 'orsb-search)
+
+(defun orsb-search--model ()
+  "The embedding model rows are written and read for."
+  org-roam-semantic-embedding-model)
 
 ;;;; Chunks on disk
 
@@ -65,10 +78,18 @@
         (and v v))
     (error nil)))
 
+(defun orsb-search--drawer-id (end)
+  "The :ID: in the property drawer from point to END, or nil."
+  (save-excursion
+    (and (re-search-forward "^[ \t]*:ID:[ \t]*\\(\\S-+\\)" end t)
+         (match-string-no-properties 1))))
+
 (defun orsb-search--read-stored (file)
-  "Return the stored chunks of FILE as a list of plists.
-Each has :position (heading start, or 1 for the file drawer), :heading,
-:embedding (a list of floats or nil) and :hash (string or nil)."
+  "Return the vectors FILE still carries as :EMBEDDING: properties.
+A list of plists, each with :position (heading start, or 1 for the file
+drawer), :heading, :id (the drawer's :ID: or nil), :embedding (a list of
+floats or nil) and :hash (the :EMBEDDING_HASH: or nil).  Only the
+migration and the stripper read these; search reads the cache."
   (with-temp-buffer
     (insert-file-contents file)
     (let ((out nil)
@@ -82,6 +103,7 @@ Each has :position (heading start, or 1 for the file drawer), :heading,
                   (hash (save-excursion (and (re-search-forward hash-rx end t) (match-string 1)))))
               (when (or emb hash)
                 (push (list :position 1 :heading nil
+                            :id (orsb-search--drawer-id end)
                             :embedding (and emb (orsb-search--parse-vector emb))
                             :hash hash)
                       out))))))
@@ -98,111 +120,251 @@ Each has :position (heading start, or 1 for the file drawer), :heading,
                       (hash (save-excursion (and (re-search-forward hash-rx end t) (match-string 1)))))
                   (when (or emb hash)
                     (push (list :position pos :heading heading
+                                :id (orsb-search--drawer-id end)
                                 :embedding (and emb (orsb-search--parse-vector emb))
                                 :hash hash)
                           out))))))))
       (nreverse out))))
 
 (defun orsb-search--strip-drawers (text)
-  "TEXT without property drawers, so stored vectors do not alter the hash.
+  "TEXT without property drawers, so drawer contents do not alter the hash.
 Not anchored to a line start: the chunk parser glues the heading and its
 body with \". \", so the drawer can follow the heading on one line."
   (replace-regexp-in-string
    "[ \t]*:PROPERTIES:[ \t]*\n\\(?:.*\n\\)*?[ \t]*:END:[ \t]*\n?" " " text))
 
+(defun orsb-search--heading-ids (file positions)
+  "The :ID: of the heading at each of POSITIONS in FILE (nil where none)."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (mapcar (lambda (pos)
+              (goto-char pos)
+              (forward-line 1)
+              (when (looking-at "^[ \t]*:PROPERTIES:")
+                (let ((end (save-excursion (re-search-forward "^[ \t]*:END:" nil t))))
+                  (and end (orsb-search--drawer-id end)))))
+            positions)))
+
 (defun orsb-search--current-chunks (file)
-  "Chunks FILE has now: list of (POSITION HEADING TEXT HASH EMBED-P).
+  "Chunks FILE has now: list of (POSITION HEADING TEXT HASH EMBED-P ID).
 TEXT is the heading plus its body with drawers removed; it is what gets
 embedded and hashed, and its word count (not the parser's, which counts
-drawer lines) decides whether the chunk is embedded or only gets an id."
-  (let ((inhibit-message t) (message-log-max nil))
-    (mapcar (lambda (c)
-              (let ((text (orsb-search--strip-drawers (nth 2 c))))
-                (list (nth 0 c) (nth 1 c) text
-                      (orsb-search--chunk-hash text)
-                      (>= (org-roam-semantic--count-words text)
-                          org-roam-semantic-min-chunk-size))))
-            (org-roam-semantic--parse-chunks file))))
+drawer lines) decides whether the chunk is embedded or only gets an id.
+ID is the heading's :ID:, the chunk's key in the cache, or nil."
+  (let* ((parsed (let ((inhibit-message t) (message-log-max nil))
+                   (org-roam-semantic--parse-chunks file)))
+         (ids (orsb-search--heading-ids file (mapcar #'car parsed))))
+    (cl-mapcar (lambda (c id)
+                 (let ((text (orsb-search--strip-drawers (nth 2 c))))
+                   (list (nth 0 c) (nth 1 c) text
+                         (orsb-search--chunk-hash text)
+                         (>= (org-roam-semantic--count-words text)
+                             org-roam-semantic-min-chunk-size)
+                         id)))
+               parsed ids)))
+
+(defun orsb-search--stale-chunks (chunks)
+  "The embeddable CHUNKS whose cache row is missing or outdated."
+  (let ((stored (orsb-embed-cache-hashes (delq nil (mapcar (lambda (c) (nth 5 c)) chunks))
+                                         (orsb-search--model))))
+    (seq-filter (lambda (c)
+                  (and (nth 4 c)
+                       (or (null (nth 5 c))
+                           (not (equal (gethash (nth 5 c) stored) (nth 3 c))))))
+                chunks)))
 
 (defun orsb-search-file-stale-p (file)
   "Non-nil when FILE has a chunk whose embedding is missing or outdated."
-  (let ((stored (orsb-search--read-stored file)))
-    (seq-some (lambda (c)
-                (and (nth 4 c)
-                     (let ((s (seq-find (lambda (x) (equal (plist-get x :heading) (nth 1 c))) stored)))
-                       (or (null s)
-                           (null (plist-get s :embedding))
-                           (not (equal (plist-get s :hash) (nth 3 c)))))))
-              (orsb-search--current-chunks file))))
+  (and (orsb-search--stale-chunks (orsb-search--current-chunks file)) t))
 
 ;;;; Generation
 
 (defvar orsb-search--inhibit-hooks nil
   "Non-nil while the worker saves a file, so the save hook does not re-queue it.")
 
-(defun orsb-search--write (file heading embedding hash)
-  "Store EMBEDDING and HASH for HEADING in FILE without saving."
-  (org-roam-semantic--store-embedding file embedding heading)
-  (with-current-buffer (find-file-noselect file)
-    (org-with-wide-buffer
-     (goto-char (point-min))
-     (when (re-search-forward (format "^\\*+[ \t]+%s[ \t]*$" (regexp-quote heading)) nil t)
-       (org-entry-put (point) orsb-search-hash-property hash)))))
-
 (defun orsb-search--save (file)
-  "Write FILE's buffer to disk without running save hooks."
+  "Write FILE's buffer to disk without running save hooks.
+Returns non-nil when something was written."
   (with-current-buffer (find-file-noselect file)
     (when (buffer-modified-p)
       (let ((orsb-search--inhibit-hooks t)
             (inhibit-read-only t))
         (write-region (point-min) (point-max) file nil :silent)
         (set-visited-file-modtime)
-        (set-buffer-modified-p nil)))))
+        (set-buffer-modified-p nil)
+        t))))
+
+(defun orsb-search--ensure-ids (file chunks)
+  "Give every chunk in CHUNKS of FILE that lacks an :ID: one, and save.
+Works on positions from the bottom up, so earlier positions stay valid.
+Skips the file when a buffer visiting it has unsaved edits (the positions
+would not match); the save hook queues it again once those are saved.
+Returns non-nil when the file was written."
+  (let ((missing (sort (mapcar #'car (seq-remove (lambda (c) (nth 5 c)) chunks)) #'>)))
+    (when missing
+      (let ((buf (find-buffer-visiting file)))
+        (unless (and buf (buffer-modified-p buf))
+          (with-current-buffer (or buf (find-file-noselect file))
+            (unless (verify-visited-file-modtime)
+              (revert-buffer t t t))
+            (org-with-wide-buffer
+             (dolist (pos missing)
+               (goto-char pos)
+               (when (org-at-heading-p)
+                 (unless (org-get-property-block) (org-insert-property-drawer))
+                 (unless (org-entry-get (point) "ID")
+                   (org-entry-put (point) "ID" (org-roam-semantic--generate-chunk-id)))))))
+          (when (orsb-search--save file)
+            ;; new ids are new nodes, and every later heading moved
+            (ignore-errors (org-roam-db-update-file file))
+            t))))))
 
 (defun orsb-search-generate-file (file &optional force)
   "Embed the chunks of FILE whose text changed (all of them with FORCE).
-Short chunks only get an :ID:.  Returns (GENERATED . SKIPPED)."
-  (let* ((stored (orsb-search--read-stored file))
-         (generated 0) (skipped 0))
-    (dolist (c (orsb-search--current-chunks file))
-      (pcase-let ((`(,_pos ,heading ,text ,hash ,embed-p) c))
-        (if (not embed-p)
-            (org-roam-semantic--ensure-heading-id file heading)
-          (let ((s (seq-find (lambda (x) (equal (plist-get x :heading) heading)) stored)))
-            (if (and (not force) s (plist-get s :embedding) (equal (plist-get s :hash) hash))
-                (setq skipped (1+ skipped))
-              (let ((embedding (org-roam-ai-generate-embedding text)))
-                (if embedding
-                    (progn (orsb-search--write file heading embedding hash)
-                           (setq generated (1+ generated)))
-                  (message "orsb-search: no embedding for %S in %s" heading (file-name-nondirectory file)))))))))
-    (orsb-search--save file)
-    (when (> generated 0) (orsb-search--index-invalidate file))
+Vectors go to the cache; the note itself changes only when a heading
+first needs an :ID:.  Returns (GENERATED . SKIPPED)."
+  (let ((chunks (orsb-search--current-chunks file)))
+    (when (orsb-search--ensure-ids file chunks)
+      (setq chunks (orsb-search--current-chunks file)))
+    (let* ((model (orsb-search--model))
+           (todo (if force (seq-filter (lambda (c) (nth 4 c)) chunks) (orsb-search--stale-chunks chunks)))
+           (generated 0)
+           (skipped (- (seq-count (lambda (c) (nth 4 c)) chunks) (length todo))))
+      (dolist (c todo)
+        (pcase-let ((`(,_pos ,heading ,text ,hash ,_embed-p ,id) c))
+          (if (null id)
+              (message "orsb-search: %S in %s has no :ID: yet, not embedded" heading (file-name-nondirectory file))
+            (let ((embedding (org-roam-ai-generate-embedding text)))
+              (if embedding
+                  (progn (orsb-embed-cache-put id embedding hash model)
+                         (orsb-search--index-put id embedding)
+                         (setq generated (1+ generated)))
+                (message "orsb-search: no embedding for %S in %s" heading (file-name-nondirectory file)))))))
+      (cons generated skipped))))
+
+(defun orsb-search-generate-all (&optional force)
+  "Run `orsb-search-generate-file' over every note now (FORCE: re-embed all).
+Returns (GENERATED . SKIPPED) summed over the vault."
+  (interactive "P")
+  (let ((generated 0) (skipped 0))
+    (dolist (file (org-roam-list-files))
+      (condition-case err
+          (let ((r (orsb-search-generate-file file force)))
+            (setq generated (+ generated (car r)) skipped (+ skipped (cdr r))))
+        (error (message "orsb-search: %s: %s" (file-name-nondirectory file) (error-message-string err)))))
+    (when (called-interactively-p 'any)
+      (message "orsb-search: %d embedded, %d already current" generated skipped))
     (cons generated skipped)))
 
-(defun orsb-search-backfill-hashes (&optional files)
-  "Give every hash-less stored embedding in FILES (default: all notes) a hash.
-Assumes the stored vector matches the current text, which is the right
-call once for a vault that predates hashes; afterwards `stale' works.
-Returns the number of hashes written."
+(defun orsb-search-backfill-hashes (&optional _files)
+  "Obsolete: hashes now live in the cache with each vector.
+Kept so old callers do not break; writes nothing and returns 0.  To bring
+in-note vectors (with or without a hash) into the cache, use
+`orsb-search-migrate-properties'."
   (interactive)
-  (let ((n 0))
+  0)
+(make-obsolete 'orsb-search-backfill-hashes 'orsb-search-migrate-properties "2.1.0")
+
+;;;; Migration from in-note vectors
+
+(defun orsb-search-migrate-properties (&optional files)
+  "Copy :EMBEDDING: vectors still in FILES (default: every note) into the cache.
+Reads the notes and writes nothing to them.  Each vector is stored under
+its drawer's :ID: for the configured model, with its :EMBEDDING_HASH:,
+or, when it has none, the hash of the chunk's current text (the same
+assumption the old hash backfill made).  A row already in the cache wins,
+so running this twice is harmless.  Vectors in a drawer without an :ID:
+cannot be keyed and are left for the worker to re-embed.
+
+Returns a plist: :files (notes that had vectors), :copied, :present
+\(already in the cache) and :no-id."
+  (interactive)
+  (let ((model (orsb-search--model))
+        (nfiles 0) (copied 0) (present 0) (no-id 0))
+    (with-sqlite-transaction (orsb-embed-cache-db)
+      (dolist (file (or files (org-roam-list-files)))
+        (let ((stored (seq-filter (lambda (s) (plist-get s :embedding)) (orsb-search--read-stored file))))
+          (when stored
+            (setq nfiles (1+ nfiles))
+            (let ((current nil))
+              (dolist (s stored)
+                (let ((id (plist-get s :id)))
+                  (if (null id)
+                      (setq no-id (1+ no-id))
+                    (let ((hash (or (plist-get s :hash)
+                                    (progn
+                                      (unless current (setq current (orsb-search--current-chunks file)))
+                                      (nth 3 (seq-find (lambda (c) (equal (nth 5 c) id)) current))))))
+                      (if (orsb-embed-cache-put-new id (plist-get s :embedding) hash model)
+                          (setq copied (1+ copied))
+                        (setq present (1+ present))))))))))))
+    (orsb-search-index-reset)
+    (let ((result (list :files nfiles :copied copied :present present :no-id no-id)))
+      (when (called-interactively-p 'any)
+        (message "orsb-search: copied %d vectors from %d notes into %s (%d already there, %d without an :ID:)"
+                 copied nfiles orsb-embed-cache-file present no-id))
+      result)))
+
+(defun orsb-search-strip-properties (&optional files dry-run)
+  "Remove :EMBEDDING: and :EMBEDDING_HASH: from FILES (default: every note).
+The separate, opt-in second step after `orsb-search-migrate-properties'.
+A drawer's vector is removed only when the cache holds a row for that
+drawer's :ID: (for any model), so nothing is dropped that the cache
+lacks.  Notes open with unsaved edits are skipped.  With DRY-RUN (the
+prefix argument interactively) nothing is written; the counts say what
+would happen.
+
+Returns a plist: :files (notes changed, or that would be), :removed
+\(vectors), :kept (vectors with no cache row or no :ID:) and :skipped
+\(notes with unsaved edits)."
+  (interactive (list nil current-prefix-arg))
+  (when (and (called-interactively-p 'any) (not dry-run)
+             (not (yes-or-no-p (format "Remove in-note embeddings that %s already holds? "
+                                       (abbreviate-file-name orsb-embed-cache-file)))))
+    (user-error "Nothing changed"))
+  (let ((nfiles 0) (removed 0) (kept 0) (skipped 0))
     (dolist (file (or files (org-roam-list-files)))
-      (let ((stored (orsb-search--read-stored file)))
-        (when (seq-some (lambda (s) (and (plist-get s :embedding) (null (plist-get s :hash)))) stored)
-          (let ((current (orsb-search--current-chunks file)))
-            (dolist (s stored)
-              (when (and (plist-get s :embedding) (null (plist-get s :hash)) (plist-get s :heading))
-                (when-let ((c (seq-find (lambda (x) (equal (nth 1 x) (plist-get s :heading))) current)))
-                  (with-current-buffer (find-file-noselect file)
-                    (org-with-wide-buffer
-                     (goto-char (point-min))
-                     (when (re-search-forward (format "^\\*+[ \t]+%s[ \t]*$" (regexp-quote (nth 1 c))) nil t)
-                       (org-entry-put (point) orsb-search-hash-property (nth 3 c))
-                       (setq n (1+ n))))))))
-            (orsb-search--save file)
-            (orsb-search--index-invalidate file)))))
-    (when (called-interactively-p 'any) (message "orsb-search: wrote %d hashes" n))
+      (let* ((stored (orsb-search--read-stored file))
+             (doomed (seq-filter (lambda (s) (and (plist-get s :id)
+                                                  (orsb-embed-cache-has-p (plist-get s :id) t)))
+                                 stored)))
+        (setq kept (+ kept (- (length stored) (length doomed))))
+        (when doomed
+          (let ((buf (find-buffer-visiting file)))
+            (if (and buf (buffer-modified-p buf))
+                (setq skipped (1+ skipped)
+                      kept (+ kept (length doomed)))
+              (setq nfiles (1+ nfiles)
+                    removed (+ removed (length doomed)))
+              (unless dry-run
+                (with-current-buffer (or buf (find-file-noselect file))
+                  (unless (verify-visited-file-modtime)
+                    (revert-buffer t t t))
+                  (org-with-wide-buffer
+                   (dolist (s doomed)
+                     (let ((pos (if (eql (plist-get s :position) 1)
+                                    (point-min)
+                                  (org-find-property "ID" (plist-get s :id)))))
+                       (when pos
+                         (org-entry-delete pos "EMBEDDING")
+                         (org-entry-delete pos orsb-search-hash-property))))))
+                (when (orsb-search--save file)
+                  (ignore-errors (org-roam-db-update-file file)))))))))
+    (let ((result (list :files nfiles :removed removed :kept kept :skipped skipped)))
+      (when (called-interactively-p 'any)
+        (message "orsb-search: %s %d vectors from %d notes (%d kept, %d notes skipped for unsaved edits)"
+                 (if dry-run "would remove" "removed") removed nfiles kept skipped))
+      result)))
+
+(defun orsb-search-prune-cache (&optional keep-other-models)
+  "Drop cache rows for nodes org-roam no longer knows, and other models' rows.
+With KEEP-OTHER-MODELS (prefix argument), rows from other models stay.
+Returns the number of rows removed."
+  (interactive "P")
+  (let ((n (orsb-embed-cache-prune (mapcar #'car (org-roam-db-query [:select [id] :from nodes]))
+                                   keep-other-models)))
+    (orsb-search-index-reset)
+    (when (called-interactively-p 'any) (message "orsb-search: removed %d cache rows" n))
     n))
 
 ;;;; Queue and worker
@@ -250,76 +412,50 @@ Returns the number of hashes written."
 ;;;; Index
 
 (defvar orsb-search--index (make-hash-table :test 'equal)
-  "File -> (MTIME . CHUNKS), CHUNKS a list of (POSITION HEADING VECTOR).")
-(defvar orsb-search--index-dirty nil)
-(defvar orsb-search--index-loaded nil)
-(defvar orsb-search--save-timer nil)
-
-(defun orsb-search--mtime (file)
-  "FILE's modification time as a float."
-  (float-time (file-attribute-modification-time (file-attributes file))))
-
-(defun orsb-search--index-invalidate (file)
-  "Forget FILE's cached chunks."
-  (remhash (file-truename file) orsb-search--index)
-  (setq orsb-search--index-dirty t))
-
-(defun orsb-search--file-chunks (file)
-  "Cached (POSITION HEADING VECTOR) triples for FILE, re-read when it changed."
-  (orsb-search--index-load)
-  (let* ((file (file-truename file))
-         (mtime (orsb-search--mtime file))
-         (cached (gethash file orsb-search--index)))
-    (if (and cached (= (car cached) mtime))
-        (cdr cached)
-      (let ((chunks (delq nil (mapcar (lambda (s)
-                                        (when (plist-get s :embedding)
-                                          (list (plist-get s :position) (plist-get s :heading) (plist-get s :embedding))))
-                                      (orsb-search--read-stored file)))))
-        (puthash file (cons mtime chunks) orsb-search--index)
-        (setq orsb-search--index-dirty t)
-        (orsb-search--index-schedule-save)
-        chunks))))
-
-(defun orsb-search--index-schedule-save ()
-  "Write the index when Emacs has been idle a while."
-  (when (and orsb-search-cache-file (not orsb-search--save-timer))
-    (setq orsb-search--save-timer
-          (run-with-idle-timer 10 nil
-                               (lambda ()
-                                 (setq orsb-search--save-timer nil)
-                                 (orsb-search--index-save))))))
-
-(defun orsb-search--index-save ()
-  "Persist the index to `orsb-search-cache-file'."
-  (when (and orsb-search-cache-file orsb-search--index-dirty)
-    (let ((alist nil))
-      (maphash (lambda (k v) (push (cons k v) alist)) orsb-search--index)
-      (make-directory (file-name-directory (expand-file-name orsb-search-cache-file)) t)
-      (with-temp-file orsb-search-cache-file
-        (let ((print-length nil) (print-level nil))
-          (prin1 alist (current-buffer))))
-      (setq orsb-search--index-dirty nil))))
+  "Node id -> vector for the model in `orsb-search--index-model'.")
+(defvar orsb-search--index-loaded nil "Non-nil once the index holds the cache.")
+(defvar orsb-search--index-model nil "Model the index was loaded for.")
 
 (defun orsb-search--index-load ()
-  "Load the persisted index once; entries are validated by mtime on use."
-  (unless orsb-search--index-loaded
-    (setq orsb-search--index-loaded t)
-    (when (and orsb-search-cache-file (file-exists-p orsb-search-cache-file))
-      (condition-case err
-          (with-temp-buffer
-            (insert-file-contents orsb-search-cache-file)
-            (dolist (cell (read (current-buffer)))
-              (puthash (car cell) (cdr cell) orsb-search--index)))
-        (error (message "orsb-search: ignoring cache %s: %s" orsb-search-cache-file (error-message-string err)))))))
+  "Load every vector of the configured model from the cache, once."
+  (unless (and orsb-search--index-loaded (equal orsb-search--index-model (orsb-search--model)))
+    (clrhash orsb-search--index)
+    (orsb-embed-cache-map (lambda (id vec) (puthash id vec orsb-search--index))
+                          (orsb-search--model))
+    (setq orsb-search--index-loaded t
+          orsb-search--index-model (orsb-search--model))))
+
+(defun orsb-search--index-put (id vector)
+  "Record ID's new VECTOR in a loaded index."
+  (when (and orsb-search--index-loaded (equal orsb-search--index-model (orsb-search--model)))
+    (puthash id vector orsb-search--index)))
 
 (defun orsb-search-index-reset ()
-  "Drop the in-memory index (and the cache file)."
+  "Drop the in-memory index; the next query reloads it from the cache."
   (interactive)
   (clrhash orsb-search--index)
-  (setq orsb-search--index-dirty nil orsb-search--index-loaded t)
-  (when (and orsb-search-cache-file (file-exists-p orsb-search-cache-file))
-    (delete-file orsb-search-cache-file)))
+  (setq orsb-search--index-loaded nil orsb-search--index-model nil))
+
+(defun orsb-search--nodes (&optional file)
+  "Org-roam nodes as (ID FILE POS LEVEL TITLE), only FILE's when given."
+  (if file
+      (mapcar (lambda (r) (cons (car r) (cons file (cdr r))))
+              (org-roam-db-query [:select [id pos level title] :from nodes :where (= file $s1)]
+                                 (expand-file-name file)))
+    (org-roam-db-query [:select [id file pos level title] :from nodes])))
+
+(defun orsb-search--node-chunk (node)
+  "NODE as (POSITION HEADING VECTOR), or nil when it has no vector.
+POSITION 1 and HEADING nil mark the file-level node."
+  (when-let ((vec (gethash (nth 0 node) orsb-search--index)))
+    (if (zerop (nth 3 node))
+        (list 1 nil vec)
+      (list (nth 2 node) (nth 4 node) vec))))
+
+(defun orsb-search--file-chunks (file)
+  "(POSITION HEADING VECTOR) triples for FILE's nodes that have a vector."
+  (orsb-search--index-load)
+  (delq nil (mapcar #'orsb-search--node-chunk (orsb-search--nodes file))))
 
 ;;;; Query
 
@@ -327,16 +463,17 @@ Returns the number of hashes written."
   "Chunks most similar to vector QV, best first.
 At most LIMIT hits, each with score >= CUTOFF.  EXCLUDE is a list of
 files whose chunks are skipped.  Each hit is (FILE SCORE POSITION HEADING)."
+  (orsb-search--index-load)
   (let ((limit (or limit 10))
         (cutoff (or cutoff 0.0))
         (skip (mapcar #'file-truename exclude))
         (hits nil))
-    (dolist (file (org-roam-list-files))
-      (unless (member (file-truename file) skip)
-        (dolist (c (orsb-search--file-chunks file))
+    (dolist (node (orsb-search--nodes))
+      (when-let ((c (orsb-search--node-chunk node)))
+        (unless (and skip (member (file-truename (nth 1 node)) skip))
           (let ((score (org-roam-semantic--cosine-similarity qv (nth 2 c))))
             (when (and score (>= score cutoff))
-              (push (list file score (nth 0 c) (nth 1 c)) hits))))))
+              (push (list (nth 1 node) score (nth 0 c) (nth 1 c)) hits))))))
     (seq-take (sort hits (lambda (a b) (> (cadr a) (cadr b)))) limit)))
 
 (defun orsb-search-similar (query &optional limit cutoff)
@@ -365,13 +502,17 @@ With START and END, only chunks whose position lies in [START, END) count."
 
 (defun orsb-search-chunk-info (file position &optional max-chars query)
   "What the chunk at POSITION in FILE says: (:heading :id :snippet).
-POSITION 1 is the file-level chunk.  The snippet is the chunk's text
+POSITION 1 is the file-level chunk; any position on a heading's line
+means that heading.  The snippet is the chunk's text
 with drawers and planning removed, at most MAX-CHARS (default 240); when
 QUERY's first word occurs in it, the snippet is taken around it."
   (let ((max-chars (or max-chars 240)))
     (with-temp-buffer
       (insert-file-contents file)
       (goto-char (min position (point-max)))
+      ;; positions come from org-roam's database, which may point inside
+      ;; the heading line rather than at its start
+      (beginning-of-line)
       (let (heading id text)
         (if (looking-at "^\\*+[ \t]+\\(.*\\)$")
             (progn
@@ -404,10 +545,45 @@ QUERY's first word occurs in it, the snippet is taken around it."
                          text))))))
 
 (defun orsb-search-index-stats ()
-  "Return (FILES-INDEXED . CHUNKS-INDEXED)."
-  (let ((files 0) (chunks 0))
-    (maphash (lambda (_k v) (setq files (1+ files) chunks (+ chunks (length (cdr v))))) orsb-search--index)
-    (cons files chunks)))
+  "Return (FILES-INDEXED . CHUNKS-INDEXED) for the loaded index."
+  (orsb-search--index-load)
+  (let ((files (make-hash-table :test 'equal)) (chunks 0))
+    (dolist (node (orsb-search--nodes))
+      (when (gethash (nth 0 node) orsb-search--index)
+        (puthash (nth 1 node) t files)
+        (setq chunks (1+ chunks))))
+    (cons (hash-table-count files) chunks)))
+
+;;;; Legacy entry points
+
+;; The commands in `org-roam-vector-search.el' (C-c v g, the similar-note
+;; inserts, `sb/' note creation) still read and write :EMBEDDING:
+;; properties.  Point them at the cache so nothing writes vectors into a
+;; note again and nothing searches the old copies.
+
+(defun orsb-search--legacy-similar (query-text &optional limit cutoff)
+  "Cache-backed `org-roam-semantic-get-similar-data' for QUERY-TEXT.
+LIMIT and CUTOFF as there; returns nil (not an error) when the embedding
+service is unreachable, as the original did."
+  (condition-case err
+      (orsb-search-similar query-text (or limit 10) (if (numberp cutoff) cutoff 0.0))
+    (error (message "orsb-search: %s" (error-message-string err)) nil)))
+
+(defun orsb-search--legacy-generate (file)
+  "Cache-backed `org-roam-semantic-generate-chunks-for-file' for FILE."
+  (interactive (list (buffer-file-name)))
+  (unless file (error "No file associated with current buffer"))
+  (orsb-search-generate-file file))
+
+(defun orsb-search--legacy-generate-all ()
+  "Cache-backed `org-roam-semantic-generate-all-chunks'."
+  (interactive)
+  (let ((r (orsb-search-generate-all)))
+    (message "orsb-search: %d embedded, %d already current" (car r) (cdr r))))
+
+(advice-add 'org-roam-semantic-get-similar-data :override #'orsb-search--legacy-similar)
+(advice-add 'org-roam-semantic-generate-chunks-for-file :override #'orsb-search--legacy-generate)
+(advice-add 'org-roam-semantic-generate-all-chunks :override #'orsb-search--legacy-generate-all)
 
 (provide 'orsb-search)
 ;;; orsb-search.el ends here

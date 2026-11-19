@@ -69,9 +69,12 @@ ollama pull nomic-embed-text
       org-roam-semantic-embedding-dimensions 768)
 ```
 
-For an existing vault: `M-x orsb-search-backfill-hashes`, then
-`M-x org-roam-semantic-generate-all-chunks` (or `sync` over MCP with
-`embeddings: true`, which queues the work for idle time). Afterwards saving a
+Vectors are kept in `~/.cache/org-roam-second-brain/embeddings.db`
+(`orsb-embed-cache-file`), outside the notes. To embed a vault:
+`M-x orsb-search-generate-all` (or `sync` over MCP with `embeddings: true`,
+which queues the work for idle time). A vault whose notes still carry
+`:EMBEDDING:` lines can skip the re-embed with
+`M-x orsb-search-migrate-properties`; see the README. Afterwards saving a
 note keeps its embeddings current in the background.
 
 ## 5. MCP server (optional)
