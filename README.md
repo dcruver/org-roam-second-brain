@@ -134,7 +134,8 @@ the hints). Set it to your own text, or `nil` to send none.
 Options:
 
 ```elisp
-(setq orsb-mcp-tool-profile 'full)    ; also offer sync and get_blog_status
+(setq orsb-mcp-tool-profile 'full)    ; also offer sync, get_blog_status and get_graph
+                                      ; (get_graph: every node and id link, for drawing the graph)
 (setq orsb-mcp-legacy-tools t)        ; also offer the 1.x and 2.0 names, marked deprecated
 (setq orsb-duplicate-similarity 0.9)  ; create_node also flags notes close in meaning
                                       ; (one embedding call per create)

@@ -72,13 +72,14 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
     (should-not (gethash "read_node" org-roam-mcp-http--tools))
     (should-not (gethash "add_heading" org-roam-mcp-http--tools))
-    ;; the full profile adds two
+    ;; the full profile adds three
     (unwind-protect
         (let ((orsb-mcp-tool-profile 'full))
           (org-roam-mcp-http--register-all-tools)
           (should (gethash "sync" org-roam-mcp-http--tools))
           (should (gethash "get_blog_status" org-roam-mcp-http--tools))
-          (should (= (hash-table-count org-roam-mcp-http--tools) 21)))
+          (should (gethash "get_graph" org-roam-mcp-http--tools))
+          (should (= (hash-table-count org-roam-mcp-http--tools) 22)))
       (org-roam-mcp-http--register-all-tools))
     ;; deprecated names only behind the flag
     (orsb-tools-test--with-legacy
@@ -88,6 +89,34 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
                                (org-roam-mcp-tool-description (gethash "read_node" org-roam-mcp-http--tools))))
       (should (string-prefix-p "[deprecated → set_node / update_body]"
                                (org-roam-mcp-tool-description (gethash "update_node" org-roam-mcp-http--tools)))))))
+
+;;;; get_graph (full profile)
+
+(ert-deftest orsb-tools-get-graph ()
+  (orsb-test-with-vault
+    (unwind-protect
+        (let ((orsb-mcp-tool-profile 'full))
+          (org-roam-mcp-http--register-all-tools)
+          (let* ((other (alist-get 'id (orsb-tools-test--data "create_node" 'node_type "note" 'title "Graph target")))
+                 (_ (orsb-tools-test--data "link_nodes" 'id "1784854105" 'target_id other))
+                 (g (orsb-tools-test--data "get_graph"))
+                 (nodes (append (alist-get 'nodes g) nil))
+                 (links (append (alist-get 'links g) nil))
+                 (ids (mapcar (lambda (n) (alist-get 'id n)) nodes))
+                 (hub (seq-find (lambda (n) (equal (alist-get 'id n) "1784854105")) nodes)))
+            (should (= (length nodes) (caar (org-roam-db-query [:select (funcall count id) :from nodes]))))
+            (should hub)
+            (should (equal (alist-get 'title hub) "Project Backlog"))
+            (should (equal (alist-get 'file hub) "projects/project-backlog-1784854105.org"))
+            (should (equal (alist-get 'level hub) 0))
+            (should (integerp (alist-get 'pos hub)))
+            (should (equal (alist-get 'tags hub) '("backlog")))
+            ;; The source is the node enclosing the link: a heading of the hub, not the file.
+            (should (seq-find (lambda (l) (equal (elt l 1) other)) links))
+            (dolist (l links)
+              (should (= (length l) 2))
+              (should (member (elt l 0) ids)))))
+      (org-roam-mcp-http--register-all-tools))))
 
 ;;;; get_node / set_node
 

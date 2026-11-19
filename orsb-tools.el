@@ -21,7 +21,7 @@
 ;; take dry_run to preview.  Everything is implemented on `orsb-core'.
 ;;
 ;; `orsb-mcp-tool-profile' picks the set: `small' (the nineteen) or `full'
-;; (adds sync and get_blog_status).  The pre-2.0 names, and the 2.0 tools
+;; (adds sync, get_blog_status and get_graph).  The pre-2.0 names, and the 2.0 tools
 ;; folded into others in 2.1, are registered only while
 ;; `orsb-mcp-legacy-tools' is non-nil, marked deprecated; the pre-2.0 ones
 ;; answer in the old {"success": ...} shape.
@@ -89,7 +89,7 @@ tool costs a small model context and a chance to pick the wrong one."
 (defcustom orsb-mcp-tool-profile 'small
   "Which tools the MCP server offers.
 `small' is the nineteen-tool set meant for small local models; `full'
-adds sync and get_blog_status."
+adds sync, get_blog_status and get_graph."
   :type '(choice (const small) (const full))
   :group 'orsb)
 
@@ -457,6 +457,29 @@ FIELDS are total, returned and, when more remain, next_offset."
                     (truncated . t) (body_chars . ,(length body))
                     (hint . "The body was cut; pass section (one of sections) or a larger max_chars."))
                 `((body . ,body)))))))
+
+;;;; The whole graph
+
+(defun orsb-tool-get-graph (_args)
+  "get_graph."
+  (let ((tags (make-hash-table :test 'equal)))
+    (dolist (row (org-roam-db-query [:select [node-id tag] :from tags]))
+      (when (and (stringp (nth 1 row)) (not (string-empty-p (nth 1 row))))
+        (push (nth 1 row) (gethash (car row) tags))))
+    `((nodes . ,(orsb--vector
+                 (mapcar (lambda (row)
+                           (let ((id (car row)))
+                             `((id . ,id)
+                               (title . ,(or (nth 4 row) ""))
+                               (file . ,(orsb-tools--relative (nth 1 row)))
+                               (level . ,(nth 2 row))
+                               (pos . ,(nth 3 row))
+                               (tags . ,(orsb--vector (nreverse (gethash id tags)))))))
+                         (org-roam-db-query [:select [id file level pos title] :from nodes]))))
+      (links . ,(orsb--vector
+                 (mapcar (lambda (row) (vector (car row) (nth 1 row)))
+                         (org-roam-db-query [:select :distinct [source dest] :from links
+                                             :where (= type "id")])))))))
 
 (defun orsb-tools--created-key (record node)
   "Sort key for created order: CREATED property, the filename stamp, else modified."
@@ -1376,7 +1399,11 @@ rebuild (the only remedy when the db and the files disagree)."
      ((id . ((type . "string")))
       (embeddings . ((type . "boolean") (default . :json-false)))
       (full . ((type . "boolean") (default . :json-false)))
-      (wait . ((type . "boolean") (default . :json-false))))))
+      (wait . ((type . "boolean") (default . :json-false)))))
+    ("get_graph" orsb-tool-get-graph
+     "The whole graph in one call, for drawing it: every node (file or heading) with id, title, vault-relative file, level, pos (character position in the file) and tags, and every id link as a [source, dest] pair. Reads the database only; no bodies."
+     ()
+     ()))
   "Tools added when `orsb-mcp-tool-profile' is `full'.")
 
 (defconst orsb-tools--deprecated
