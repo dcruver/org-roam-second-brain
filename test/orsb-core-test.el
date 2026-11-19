@@ -65,6 +65,7 @@ Files without an :ID: are not org-roam nodes.
           (org-id-track-globally t)
           (org-id-locations nil)
           (make-backup-files nil)
+          (orsb-change-directory (expand-file-name ".orsb-changes" dir))
           (org-roam-db-update-on-save nil))
      (unwind-protect
          (progn
@@ -310,6 +311,33 @@ Files without an :ID: are not org-roam nodes.
       (should (equal (plist-get (car (plist-get s :drafts)) :outline) '(1 . 2)))
       (should (equal (org-roam-node-title (car (plist-get s :published))) "Old Post"))
       (should (equal (org-roam-node-title (car (plist-get s :ideas))) "Why the shed matters")))))
+
+;;;; change journal
+
+(ert-deftest orsb-core-change-rolls-back-on-error ()
+  (orsb-test-with-vault
+    (let* ((file "projects/project-backlog-1784854105.org")
+           (before (orsb-test--file file)))
+      ;; a write followed by a failure: the file is put back, nothing journaled
+      (should-error (orsb-core-call-with-change
+                     "test" "half done" nil
+                     (lambda ()
+                       (orsb-core-append-body (orsb-core-resolve "1784854105") "half done")
+                       (error "boom"))))
+      (should (equal (orsb-test--file file) before))
+      (should (null (orsb-core-changes)))
+      ;; a nested call joins the outer change: one entry for both writes
+      (let ((r (orsb-core-call-with-change
+                "test" "two writes" nil
+                (lambda ()
+                  (orsb-core-append-body (orsb-core-resolve "1784854105") "one")
+                  (orsb-core-call-with-change "inner" "x" nil
+                                              (lambda () (orsb-core-append-body (orsb-core-resolve "1784854105") "two")))
+                  'done))))
+        (should (eq (car r) 'done))
+        (should (= (length (orsb-core-changes)) 1))
+        (orsb-core-restore (cdr r))
+        (should (equal (orsb-test--file file) before))))))
 
 (provide 'orsb-core-test)
 ;;; orsb-core-test.el ends here

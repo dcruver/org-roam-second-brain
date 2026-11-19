@@ -6,12 +6,12 @@ rely on, semantic search over your vault, a daily digest, and an **MCP server**
 so an LLM assistant uses the same notes you do. Everything is Emacs Lisp; the
 only external service is an OpenAI-compatible embeddings endpoint (optional).
 
-Version 2.0 has one core and one contract:
+Version 2.1 has one core and one contract, sized for small local models:
 
 | Module | What it is |
 |---|---|
 | `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create typed notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
-| `orsb-tools.el` | The 18-tool MCP contract on top of the core, one `id` parameter, one `{ok, data | error}` envelope, one status vocabulary. The pre-2.0 tool names remain as deprecated mappers (see `MIGRATION.md`). |
+| `orsb-tools.el` | The 19-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, one status vocabulary, and an undo journal behind every write. Older tool names are available behind `orsb-mcp-legacy-tools` (see `MIGRATION.md`). |
 | `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
 | `orsb-search.el` | Semantic search: chunk embeddings stored in the notes beside a content hash, an mtime-keyed index with a cache file, and an idle-time worker that re-embeds what changed. |
 | `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
@@ -86,28 +86,58 @@ curl -s -X POST http://localhost:8007/mcp -H 'Content-Type: application/json' \
 
 ### Tools
 
+Nineteen tools by default (`orsb-mcp-tool-profile` is `small`). A small model
+gets fewer, clearer choices, and every error says what to do next.
+
 | Tool | Purpose |
 |---|---|
-| `search` | title / contextual / semantic search; hits carry id, type, status, snippet |
-| `get_node` | one node: properties (its drawer), keywords, tags, links, body, or one `section` |
-| `list_nodes` | file nodes filtered by type, status, staleness, tags |
-| `create_node` | a typed note in its conventional directory |
-| `add_heading` | a heading node with its own id |
-| `set_node` | title, status (validated), todo, properties, tags, keywords |
-| `update_body` | append / prepend / replace, per section or whole note (guarded) |
-| `delete_node` | delete a heading, or delete / archive a note |
-| `link_nodes` | add or remove an `[[id:...]]` link |
-| `add_daily_entry`, `get_daily`, `log_to_inbox` | daily notes and the inbox |
-| `get_digest`, `get_projects`, `get_followups`, `get_blog_status` | surfacing |
-| `sync` | database and embedding refresh |
-| `get_schema` | the vocabulary the server enforces |
+| `search` | semantic (by meaning), contextual (word match) or title search; each hit names the matching section and shows a snippet from it |
+| `get_node` | one note or heading: metadata, links, an outline of its sections, and the body (cut at `max_chars`; read one `section` at a time) |
+| `list_nodes` | notes filtered by type, status, staleness, tags, `orphan`, `broken_links` or `linked_to`; pages with `limit` and `offset` |
+| `find_related` | notes close in meaning to a note or a text, each marked `linked` or not, so missing links stand out |
+| `create_node` | a typed note, or with `parent_id` a heading (task, section) inside one, with `todo`, `scheduled`, `deadline`; refuses an existing title and lists it (`on_duplicate`) |
+| `set_node` | title (link text elsewhere follows), status, todo, scheduled, deadline, properties, tags, aliases, keywords; `heading` picks a heading by title |
+| `update_body` | append / prepend / replace, per section or whole note (guarded); a missing section is an error listing the real ones |
+| `set_checkbox` | tick or untick one checklist item, by its text or index |
+| `get_tasks` | open TODO headings and checkboxes across the vault, dated first; filter by state, note, person, due date, text |
+| `link_nodes` | add (idempotent) or remove a link; `both_ways`; removing a link inside a sentence keeps the words |
+| `move_node` | refile a heading under another note or heading, or make it a note of its own; links keep working |
+| `merge_nodes` | fold one note into another as a section; links to it keep working |
+| `delete_node` | delete a heading, or archive (default) / delete a note; returns the notes that linked to it |
+| `add_daily_entry` | a structured entry in today's (or a given day's) daily note |
+| `log_to_inbox`, `resolve_inbox` | add a line to today's inbox and get its ref; later mark it done, optionally filing it into a note |
+| `get_review` | one call for what needs attention: projects, due tasks, follow-ups, open inbox entries, vault health |
+| `restore` | undo any write by its `change_id`, or list recent changes |
+| `get_schema` | the vocabulary the server enforces: types, statuses, TODO keywords, tags in use |
 
-Every tool takes `id` as an org-roam id, a vault-relative path, or an exact
-title, and answers `{"ok":true,"data":{...}}` or
-`{"ok":false,"error":{"code","message","hint"}}` (with MCP `isError`).
-Status is validated: `active | waiting | blocked | someday | done | cancelled`
-for notes, `idea | stub | draft | published` for blog posts.
-`M-x orsb-migrate-status` normalizes older spellings in a vault.
+Every tool takes `id` as an org-roam id, a vault-relative path, an exact
+title or alias, or `today` / `yesterday` / `YYYY-MM-DD` for a daily note. An
+ambiguous title is an error listing the candidates. Answers are
+`{"ok":true,"data":{...}}` or `{"ok":false,"error":{"code","message","hint"}}`
+(with MCP `isError`). Status is validated: `active | waiting | blocked |
+someday | done | cancelled` for notes, `idea | stub | draft | published` for
+blog posts. `M-x orsb-migrate-status` normalizes older spellings in a vault.
+
+Every write is recorded: the answer carries a `change_id`, and `restore`
+with it puts every file the write touched back as it was (a restore is
+itself recorded, so it can be undone too). Most writes also take
+`dry_run: true`, which answers with what would change and writes nothing.
+If a write fails halfway, the files it already changed are put back. The
+journal lives in `orsb-change-directory` (default `orsb-changes/` in your
+Emacs directory) and keeps the last `orsb-change-keep` (200) changes.
+
+At `initialize` the server sends `orsb-mcp-instructions`, a few lines of
+guidance for the model (search before creating, undo with restore, follow
+the hints). Set it to your own text, or `nil` to send none.
+
+Options:
+
+```elisp
+(setq orsb-mcp-tool-profile 'full)    ; also offer sync and get_blog_status
+(setq orsb-mcp-legacy-tools t)        ; also offer the 1.x and 2.0 names, marked deprecated
+(setq orsb-duplicate-similarity 0.9)  ; create_node also flags notes close in meaning
+                                      ; (one embedding call per create)
+```
 
 ## Semantic search
 
@@ -129,4 +159,4 @@ make reload   # reload into a running Emacs server and restart the MCP server
 ```
 
 CI runs the same on Emacs 29 and 30. See `SETUP.md` for a full
-walkthrough and `MIGRATION.md` for the 1.x → 2.0 tool mapping.
+walkthrough and `MIGRATION.md` for the 1.x → 2.0 → 2.1 tool mapping.

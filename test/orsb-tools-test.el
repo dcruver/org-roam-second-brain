@@ -15,14 +15,24 @@
 (require 'orsb-core-test)   ; fixtures: orsb-test-with-vault, orsb-test--file, orsb-test--json
 
 (defun orsb-tools-test--ensure-registered ()
-  "Register the tool set once (the hash is global)."
-  (unless (gethash "get_schema" org-roam-mcp-http--tools)
+  "Register the default tool set unless it is what the hash holds."
+  (unless (and (gethash "get_schema" org-roam-mcp-http--tools)
+               (not (gethash "read_note" org-roam-mcp-http--tools)))
     (org-roam-mcp-http--register-all-tools)))
+
+(defmacro orsb-tools-test--with-legacy (&rest body)
+  "Run BODY with the deprecated names registered, then restore the default set."
+  (declare (indent 0))
+  `(unwind-protect
+       (let ((orsb-mcp-legacy-tools t))
+         (org-roam-mcp-http--register-all-tools)
+         ,@body)
+     (org-roam-mcp-http--register-all-tools)))
 
 (defun orsb-tools-test--call (name &rest args)
   "Call tool NAME with ARGS (a plist of symbol keys) via the JSON-RPC handler.
 Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
-  (orsb-tools-test--ensure-registered)
+  (unless (gethash name org-roam-mcp-http--tools) (orsb-tools-test--ensure-registered))
   (let* ((arguments (let (out) (while args (push (cons (pop args) (pop args)) out)) (nreverse out)))
          (raw (org-roam-mcp-http--handle-tools-call `((name . ,name) (arguments . ,arguments))))
          (rpc (orsb-test--json raw))
@@ -53,14 +63,31 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (member "waiting" (alist-get 'status_values schema)))
       (should (equal (alist-get 'stale_days schema) orsb-stale-days))
       (should (equal (cdr (assq 'completed (alist-get 'status_aliases schema))) "done")))
-    (dolist (name '("search" "get_node" "list_nodes" "create_node" "add_heading" "set_node" "update_body"
-                    "delete_node" "link_nodes" "add_daily_entry" "get_daily" "log_to_inbox" "get_digest"
-                    "get_projects" "get_followups" "get_blog_status" "sync" "get_schema"))
-      (should (gethash name org-roam-mcp-http--tools)))
-    (should (string-prefix-p "[deprecated → get_node]"
-                             (org-roam-mcp-tool-description (gethash "read_node" org-roam-mcp-http--tools))))
-    (should (string-prefix-p "[deprecated → set_node / update_body]"
-                             (org-roam-mcp-tool-description (gethash "update_node" org-roam-mcp-http--tools))))))
+    ;; the small profile: exactly these nineteen, nothing deprecated
+    (orsb-tools-test--ensure-registered)
+    (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
+                   "set_checkbox" "get_tasks" "link_nodes" "move_node" "merge_nodes" "delete_node"
+                   "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema")))
+      (dolist (name names) (should (gethash name org-roam-mcp-http--tools)))
+      (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
+    (should-not (gethash "read_node" org-roam-mcp-http--tools))
+    (should-not (gethash "add_heading" org-roam-mcp-http--tools))
+    ;; the full profile adds two
+    (unwind-protect
+        (let ((orsb-mcp-tool-profile 'full))
+          (org-roam-mcp-http--register-all-tools)
+          (should (gethash "sync" org-roam-mcp-http--tools))
+          (should (gethash "get_blog_status" org-roam-mcp-http--tools))
+          (should (= (hash-table-count org-roam-mcp-http--tools) 21)))
+      (org-roam-mcp-http--register-all-tools))
+    ;; deprecated names only behind the flag
+    (orsb-tools-test--with-legacy
+      (should (string-prefix-p "[deprecated → create_node with parent_id]"
+                               (org-roam-mcp-tool-description (gethash "add_heading" org-roam-mcp-http--tools))))
+      (should (string-prefix-p "[deprecated → get_node]"
+                               (org-roam-mcp-tool-description (gethash "read_node" org-roam-mcp-http--tools))))
+      (should (string-prefix-p "[deprecated → set_node / update_body]"
+                               (org-roam-mcp-tool-description (gethash "update_node" org-roam-mcp-http--tools)))))))
 
 ;;;; get_node / set_node
 
@@ -146,10 +173,16 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (eq (alist-get 'stale (car (alist-get 'nodes projects))) :json-false)))
     (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'status "done")) 0))
     (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'tags ["backlog"])) 1))
-    (let ((p (orsb-tools-test--data "get_projects")))
-      (should (equal (alist-get 'next_action (car (alist-get 'projects p))) "Phase 4 status curation.")))
-    (let ((stale (orsb-tools-test--data "get_projects" 'stale t 'days_threshold 0)))
-      (should (= (alist-get 'total stale) 1)))))
+    (let ((p (orsb-tools-test--data "list_nodes" 'node_type "project")))
+      (should (equal (alist-get 'next_action (car (alist-get 'nodes p))) "Phase 4 status curation.")))
+    (let ((page (orsb-tools-test--data "list_nodes" 'limit 1)))
+      (should (= (alist-get 'returned page) 1))
+      (should (= (alist-get 'next_offset page) 1)))
+    (orsb-tools-test--with-legacy
+      (let ((p (orsb-tools-test--data "get_projects")))
+        (should (equal (alist-get 'next_action (car (alist-get 'projects p))) "Phase 4 status curation.")))
+      (let ((orsb-stale-days 0))
+        (should (= (alist-get 'total (orsb-tools-test--data "get_projects" 'stale t 'days_threshold 0)) 1))))))
 
 (ert-deftest orsb-tools-search-title-and-contextual ()
   (orsb-test-with-vault
@@ -158,7 +191,8 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'id (car (alist-get 'hits t1))) "1784854105")))
     (let ((c (orsb-tools-test--data "search" 'query "central index" 'mode "contextual")))
       (should (>= (alist-get 'total c) 1))
-      (should (string-match-p "Next Actions" (alist-get 'snippet (car (alist-get 'hits c))))))
+      ;; the snippet is taken around the match
+      (should (string-match-p "Central index" (alist-get 'snippet (car (alist-get 'hits c))))))
     (should (= (alist-get 'total (orsb-tools-test--data "search" 'query "zzzz-nothing" 'mode "title")) 0))
     (should (equal (alist-get 'code (orsb-tools-test--error "search" 'query "x" 'mode "magic")) "invalid_argument"))))
 
@@ -174,7 +208,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'NEXT-ACTION (alist-get 'properties created)) "Buy lumber"))
       (should (string-prefix-p "projects/" (alist-get 'file created)))
       (should (member "home" (alist-get 'tags created)))
-      (let ((h (orsb-tools-test--data "add_heading" 'id id 'heading "Materials" 'body "- lumber" 'todo "TODO")))
+      (let ((h (orsb-tools-test--data "create_node" 'parent_id id 'title "Materials" 'body "- lumber" 'todo "TODO")))
         (should (= (alist-get 'level h) 1))
         (should (equal (alist-get 'todo h) "TODO"))
         (should (equal (alist-get 'title h) "Materials")))
@@ -201,14 +235,18 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
   (orsb-test-with-vault
     (let ((org-roam-dailies-directory "daily/"))
       (orsb-tools-test--data "add_daily_entry" 'title "Kai did a thing" 'points ["one" "two"] 'tags ["kai"])
-      (let ((d (orsb-tools-test--data "get_daily")))
-        (should (string-match-p "Kai did a thing" (alist-get 'content d)))
-        (should (string-match-p "- one" (alist-get 'content d))))
+      (let ((d (orsb-tools-test--data "get_node" 'id "today")))
+        (should (string-match-p "Kai did a thing" (alist-get 'body d)))
+        (should (string-match-p "- one" (alist-get 'body d))))
       (orsb-tools-test--data "log_to_inbox" 'text "file this" 'linked_id "1784854105")
-      (should (string-match-p "file this" (alist-get 'content (orsb-tools-test--data "get_daily")))))
-    (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'id "1784854105")) "projects/project-backlog-1784854105.org"))
-    (should (eq (alist-get 'queued (orsb-tools-test--data "sync")) t))
-    (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'wait t 'full t)) "db"))))
+      (should (string-match-p "file this" (alist-get 'body (orsb-tools-test--data "get_node" 'id "today")))))
+    (unwind-protect
+        (let ((orsb-mcp-tool-profile 'full))
+          (org-roam-mcp-http--register-all-tools)
+          (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'id "1784854105")) "projects/project-backlog-1784854105.org"))
+          (should (eq (alist-get 'queued (orsb-tools-test--data "sync")) t))
+          (should (equal (alist-get 'synced (orsb-tools-test--data "sync" 'wait t 'full t)) "db")))
+      (org-roam-mcp-http--register-all-tools))))
 
 ;;;; missing args: JSON-RPC -32602 before dispatch
 
@@ -222,7 +260,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
 
 (ert-deftest orsb-tools-legacy-names-map-onto-the-contract ()
   (orsb-test-with-vault
-    (orsb-tools-test--ensure-registered)
+   (orsb-tools-test--with-legacy
     (cl-flet ((legacy (name &rest args)
                 (let* ((arguments (let (out) (while args (push (cons (pop args) (pop args)) out)) (nreverse out)))
                        (raw (org-roam-mcp-http--handle-tools-call `((name . ,name) (arguments . ,arguments))))
@@ -255,7 +293,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
         (should-not (alist-get 'isError (alist-get 'result (car r)))))
       ;; deprecated marker in the listing
       (should (string-prefix-p "[deprecated → get_node]"
-                               (org-roam-mcp-tool-description (gethash "read_note" org-roam-mcp-http--tools)))))))
+                               (org-roam-mcp-tool-description (gethash "read_note" org-roam-mcp-http--tools))))))))
 
 ;;;; status migration
 

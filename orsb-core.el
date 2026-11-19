@@ -39,6 +39,12 @@ CODE is a symbol such as `not-found', `invalid-argument', `refused'
 or `unavailable'; adapters map it to their own error vocabulary."
   (signal 'orsb-error (list code (apply #'format message args))))
 
+(defun orsb-error-hint (code hint message &rest args)
+  "Like `orsb-error' with CODE and MESSAGE, plus HINT.
+HINT says what the caller should do next.
+Adapters show HINT instead of their generic per-code hint."
+  (signal 'orsb-error (list code (apply #'format message args) hint)))
+
 ;;;; Customization
 
 (defgroup orsb nil
@@ -78,19 +84,64 @@ an underscore, so \"EMBEDDING\" hides EMBEDDING, EMBEDDING_HASH, ..."
                             file))))
         (org-roam-node-from-id id))))
 
+(defun orsb-core--title-candidates (title)
+  "Nodes whose title or alias is TITLE (case-insensitive), as (ID . FILE) pairs."
+  (seq-uniq
+   (mapcar (lambda (row) (cons (car row) (cadr row)))
+           (append
+            (org-roam-db-query [:select [id file] :from nodes :where (= title $s1) :collate NOCASE] title)
+            (org-roam-db-query [:select [nodes:id nodes:file] :from aliases
+                                :inner-join nodes :on (= aliases:node-id nodes:id)
+                                :where (= aliases:alias $s1) :collate NOCASE]
+                               title)))))
+
+(defun orsb-core--from-title (title)
+  "The node titled (or aliased) TITLE, nil when none.
+Two or more matches signal `invalid-argument' listing their ids, so the
+caller can pick one instead of hitting an internal error."
+  (let ((exact (condition-case nil (org-roam-node-from-title-or-alias title) (error :ambiguous))))
+    (cond
+     ((org-roam-node-p exact) exact)
+     (t (let ((cands (orsb-core--title-candidates title)))
+          (cond
+           ((null cands) nil)
+           ((and (= (length cands) 1) (not (eq exact :ambiguous))) (org-roam-node-from-id (caar cands)))
+           (t (orsb-error-hint
+               'invalid-argument "Pass one of these ids as id instead of the title."
+               "%d notes are titled %S: %s" (length cands) title
+               (mapconcat (lambda (c) (format "%s (%s)" (car c)
+                                              (file-relative-name (cdr c) org-roam-directory)))
+                          cands "; ")))))))))
+
+(defun orsb-core--date-node (identifier)
+  "The daily note IDENTIFIER names (\"today\", \"yesterday\", YYYY-MM-DD), or nil.
+Signals `not-found' when the day has no daily note."
+  (let ((date (cond ((string= (downcase identifier) "today") (format-time-string "%Y-%m-%d"))
+                    ((string= (downcase identifier) "yesterday")
+                     (format-time-string "%Y-%m-%d" (time-subtract (current-time) (days-to-time 1))))
+                    ((string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" identifier) identifier))))
+    (when date
+      (let ((path (orsb-core-daily-file date)))
+        (or (and (file-exists-p path) (orsb-core--first-node-in-file (file-truename path)))
+            (orsb-error-hint 'not-found "add_daily_entry or log_to_inbox creates the day's note."
+                             "No daily note for %s" date))))))
+
 (defun orsb-core-resolve (identifier)
   "Return the org-roam node IDENTIFIER names, signalling `not-found' otherwise.
 IDENTIFIER is tried as an org-roam id, then as an absolute path or a path
-relative to `org-roam-directory', then as an exact title or alias."
+relative to `org-roam-directory', then as an exact title or alias, then as
+a day (\"today\", \"yesterday\" or YYYY-MM-DD) naming a daily note.  A
+title shared by several nodes signals `invalid-argument' with their ids."
   (unless (and (stringp identifier) (not (string-empty-p (string-trim identifier))))
     (orsb-error 'invalid-argument "id must be a non-empty string"))
   (let ((identifier (string-trim identifier)))
     (or (org-roam-node-from-id identifier)
         (let ((path (cond ((file-name-absolute-p identifier) identifier)
                           (t (expand-file-name identifier org-roam-directory)))))
-          (when (file-exists-p path)
+          (when (and (file-exists-p path) (not (file-directory-p path)))
             (orsb-core--first-node-in-file (file-truename path))))
-        (org-roam-node-from-title-or-alias identifier)
+        (orsb-core--from-title identifier)
+        (orsb-core--date-node identifier)
         (orsb-error 'not-found "No note or node matches %S" identifier))))
 
 ;;;; Buffer access
@@ -133,15 +184,303 @@ request path; the embedding refresh is queued separately."
     (set-visited-file-modtime)
     (set-buffer-modified-p nil)))
 
+;;;; Change journal: backups, dry runs, undo
+;;
+;; Every write ends in `orsb-core--after-write' (buffer edits) or one of the
+;; `orsb-core--fs-*' helpers (whole-file operations).  Inside
+;; `orsb-core-call-with-change' both first record the file's on-disk content,
+;; so a change can be undone (`orsb-core-restore') or, when it fails half way,
+;; rolled back automatically.  With `orsb-core-dry-run' bound, edits stay in
+;; the buffers and nothing touches the disk; the caller gets a preview and
+;; every buffer is reverted afterwards.
+
+(defcustom orsb-change-directory nil
+  "Directory of the change journal (one file per change).
+nil means `orsb-changes/' under `user-emacs-directory'.  It is kept out of
+the vault so org-roam never indexes it."
+  :type '(choice (const nil) directory)
+  :group 'orsb)
+
+(defcustom orsb-change-keep 200
+  "How many changes the journal keeps; older ones are pruned."
+  :type 'integer
+  :group 'orsb)
+
+(defvar orsb-core--change nil
+  "The change being recorded, a plist (:files ALIST :ops LIST), or nil.
+:files maps each touched file (absolute) to its content before the change,
+nil for a file that did not exist.  :ops lists planned whole-file operations
+for previews.")
+
+(defvar orsb-core-dry-run nil
+  "Non-nil while a change is previewed: buffers change, the disk does not.")
+
+(defun orsb-core--disk-content (file)
+  "FILE's content on disk as a string, or nil when it does not exist."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8))
+        (insert-file-contents file))
+      (buffer-string))))
+
+(defun orsb-core--snapshot (file)
+  "Remember FILE's on-disk content in the current change (first touch only)."
+  (when (and orsb-core--change file)
+    (let ((file (expand-file-name file)))
+      (unless (assoc file (plist-get orsb-core--change :files))
+        (setq orsb-core--change
+              (plist-put orsb-core--change :files
+                         (cons (cons file (orsb-core--disk-content file))
+                               (plist-get orsb-core--change :files))))))))
+
+(defun orsb-core--plan (op &rest args)
+  "Record whole-file operation OP with ARGS for the preview."
+  (when orsb-core--change
+    (setq orsb-core--change
+          (plist-put orsb-core--change :ops
+                     (append (plist-get orsb-core--change :ops) (list (cons op args)))))))
+
 (defun orsb-core--after-write (file)
   "Persist FILE's buffer and bring the org-roam db up to date for it.
-Every mutation ends here."
-  (with-current-buffer (find-file-noselect file)
-    (orsb-core--save-quietly))
-  (org-roam-db-update-file file)
-  ;; Embeddings are refreshed by the idle worker, never on the request path.
-  (when (fboundp 'orsb-search-enqueue)
-    (orsb-search-enqueue file)))
+Every buffer mutation ends here.  Inside a recorded change the old content
+is kept first; in a dry run the edit stays in the buffer, unsaved."
+  (orsb-core--snapshot file)
+  (unless orsb-core-dry-run
+    (with-current-buffer (find-file-noselect file)
+      (orsb-core--save-quietly))
+    (org-roam-db-update-file file)
+    ;; Embeddings are refreshed by the idle worker, never on the request path.
+    (when (fboundp 'orsb-search-enqueue)
+      (orsb-search-enqueue file))))
+
+(defun orsb-core--forget-buffer (file)
+  "Kill FILE's buffer without saving, if it has one."
+  (when-let ((buf (find-buffer-visiting file)))
+    (with-current-buffer buf (set-buffer-modified-p nil))
+    (kill-buffer buf)))
+
+(defun orsb-core--fs-delete (file)
+  "Delete FILE as part of the current change."
+  (orsb-core--snapshot file)
+  (orsb-core--plan 'delete file)
+  (unless orsb-core-dry-run
+    (orsb-core--forget-buffer file)
+    (delete-file file)
+    (orsb-core-db-refresh file)))
+
+(defun orsb-core--fs-rename (from to)
+  "Move file FROM to TO as part of the current change (TO must not exist)."
+  (orsb-core--snapshot from)
+  (orsb-core--snapshot to)
+  (orsb-core--plan 'move from to)
+  (unless orsb-core-dry-run
+    (orsb-core--forget-buffer from)
+    (make-directory (file-name-directory to) t)
+    (rename-file from to)
+    (orsb-core-db-refresh from to)))
+
+(defun orsb-core--fs-write (file content)
+  "Write CONTENT to FILE (nil CONTENT deletes it) as part of the current change."
+  (orsb-core--snapshot file)
+  (orsb-core--plan (if content 'write 'delete) file)
+  (unless orsb-core-dry-run
+    (orsb-core--forget-buffer file)
+    (if content
+        (progn (make-directory (file-name-directory file) t)
+               (let ((coding-system-for-write 'utf-8))
+                 (write-region content nil file nil :silent)))
+      (when (file-exists-p file) (delete-file file)))
+    (orsb-core-db-refresh file)
+    (when (and content (fboundp 'orsb-search-enqueue))
+      (orsb-search-enqueue file))))
+
+(defun orsb-core--change-dir ()
+  "The journal directory, created on demand."
+  (let ((dir (file-name-as-directory
+              (expand-file-name (or orsb-change-directory (locate-user-emacs-file "orsb-changes/"))))))
+    (make-directory dir t)
+    dir))
+
+(defun orsb-core--hash (content)
+  "Hash of file CONTENT (nil for a missing file)."
+  (and content (sha1 content)))
+
+(defun orsb-core--rel (file)
+  "FILE relative to the vault when it is inside it."
+  (if (and file (string-prefix-p (file-truename org-roam-directory) (file-truename file)))
+      (file-relative-name (file-truename file) (file-truename org-roam-directory))
+    file))
+
+(defun orsb-core--line-diff (old new)
+  "Lines removed from OLD and added in NEW, as (REMOVED . ADDED).
+At most 15 of each."
+  (let* ((ol (split-string (or old "") "\n"))
+         (nl (split-string (or new "") "\n"))
+         (count (lambda (lines)
+                  (let ((h (make-hash-table :test 'equal)))
+                    (dolist (l lines) (puthash l (1+ (gethash l h 0)) h))
+                    h)))
+         (oh (funcall count ol)) (nh (funcall count nl))
+         removed added)
+    (dolist (l ol) (if (> (gethash l nh 0) 0) (puthash l (1- (gethash l nh)) nh)
+                     (unless (string-blank-p l) (push l removed))))
+    (dolist (l nl) (if (> (gethash l oh 0) 0) (puthash l (1- (gethash l oh)) oh)
+                     (unless (string-blank-p l) (push l added))))
+    (cons (seq-take (nreverse removed) 15) (seq-take (nreverse added) 15))))
+
+(defun orsb-core--preview ()
+  "Describe the change being recorded (dry run) as a list of alists."
+  (let ((ops (plist-get orsb-core--change :ops)) out)
+    (dolist (cell (reverse (plist-get orsb-core--change :files)))
+      (let* ((file (car cell)) (old (cdr cell))
+             (op (seq-find (lambda (o) (member file (cdr o))) ops))
+             (buf (find-buffer-visiting file))
+             (new (cond ((and op (eq (car op) 'delete)) nil)
+                        ((and op (eq (car op) 'move)) (if (equal file (nth 1 op)) nil old))
+                        ((and buf (buffer-modified-p buf)) (with-current-buffer buf (buffer-substring-no-properties (point-min) (point-max))))
+                        (t old)))
+             (action (cond ((and op (eq (car op) 'move)) (if (equal file (nth 1 op)) "move_from" "move_to"))
+                           ((and op (eq (car op) 'delete)) "delete")
+                           ((null old) "create")
+                           (t "edit"))))
+        (unless (and (equal action "edit") (equal old new))
+          (let ((d (orsb-core--line-diff old (if (equal action "move_to") (cdr (assoc (nth 1 op) (plist-get orsb-core--change :files))) new))))
+            (push `((file . ,(orsb-core--rel file)) (action . ,action)
+                    (chars_before . ,(length (or old "")))
+                    (chars_after . ,(length (or new (and (equal action "move_to") (cdr (assoc (nth 1 op) (plist-get orsb-core--change :files)))) "")))
+                    ,@(unless (member action '("move_from" "move_to"))
+                        `((lines_removed . ,(vconcat (car d))) (lines_added . ,(vconcat (cdr d))))))
+                  out)))))
+    (nreverse out)))
+
+(defun orsb-core--revert-touched ()
+  "Undo unsaved dry-run edits in every buffer the current change touched."
+  (dolist (cell (plist-get orsb-core--change :files))
+    (when-let ((buf (find-buffer-visiting (car cell))))
+      (if (cdr cell)
+          (with-current-buffer buf
+            (let ((inhibit-read-only t) (pt (point)))
+              (erase-buffer)
+              (insert (cdr cell))
+              (goto-char (min pt (point-max)))
+              (set-buffer-modified-p nil)))
+        (orsb-core--forget-buffer (car cell))))))
+
+(defun orsb-core--put-back (files)
+  "Write each (FILE . CONTENT) in FILES back to disk; nil CONTENT deletes FILE."
+  (dolist (cell files)
+    (let ((file (car cell)) (content (cdr cell)))
+      (orsb-core--forget-buffer file)
+      (if content
+          (progn (make-directory (file-name-directory file) t)
+                 (let ((coding-system-for-write 'utf-8))
+                   (write-region content nil file nil :silent)))
+        (when (file-exists-p file) (delete-file file)))))
+  ;; clear before update so an id that moved between files never collides
+  (dolist (cell files) (unless (cdr cell) (ignore-errors (org-roam-db-clear-file (car cell)))))
+  (dolist (cell files) (when (cdr cell) (ignore-errors (org-roam-db-clear-file (car cell)))))
+  (dolist (cell files) (when (cdr cell) (org-roam-db-update-file (car cell)))))
+
+(defun orsb-core--journal-write (tool summary)
+  "Store the current change under a new id and return the id.
+Return nil if nothing changed."
+  (let ((files (seq-remove (lambda (c) (equal (cdr c) (orsb-core--disk-content (car c))))
+                           (plist-get orsb-core--change :files))))
+    (when files
+      (let* ((id (format "%s-%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
+             (entry (list :id id :time (format-time-string "%Y-%m-%dT%H:%M:%S%z")
+                          :tool tool :summary summary :vault (expand-file-name org-roam-directory)
+                          :files (mapcar (lambda (c) (list (car c) (cdr c) (orsb-core--hash (orsb-core--disk-content (car c)))))
+                                         files)))
+             (dir (orsb-core--change-dir)))
+        (let ((coding-system-for-write 'utf-8))
+          (with-temp-file (expand-file-name (concat id ".eld") dir)
+            (let ((print-length nil) (print-level nil) (print-escape-newlines nil))
+              (prin1 entry (current-buffer)))))
+        (let ((all (directory-files dir t "\\.eld\\'")))
+          (when (> (length all) orsb-change-keep)
+            (mapc #'delete-file (seq-take all (- (length all) orsb-change-keep)))))
+        id))))
+
+(defun orsb-core-call-with-change (tool summary dry-run fn)
+  "Run FN as one recorded change named TOOL with SUMMARY.
+Returns (RESULT . CHANGE): CHANGE is the new change id (nil when nothing
+was written) or, with DRY-RUN, a preview of what would change.  When FN
+signals, the files it already wrote are put back before the error goes on.
+A call nested inside another change joins it."
+  (if orsb-core--change
+      (cons (funcall fn) nil)
+    (let ((orsb-core--change (list :files nil :ops nil))
+          (orsb-core-dry-run dry-run)
+          (done nil))
+      (unwind-protect
+          (let ((result (funcall fn)))
+            (setq done t)
+            (cons result (if dry-run (orsb-core--preview) (orsb-core--journal-write tool summary))))
+        (cond (dry-run (orsb-core--revert-touched))
+              ((not done)
+               (orsb-core--put-back (seq-remove (lambda (c) (equal (cdr c) (orsb-core--disk-content (car c))))
+                                                (plist-get orsb-core--change :files)))))))))
+
+(defun orsb-core--journal-read (id)
+  "The journal entry for change ID, or signal `not-found'."
+  (let ((file (expand-file-name (concat id ".eld") (orsb-core--change-dir))))
+    (unless (and (string-match-p "\\`[0-9T]+-[0-9a-f]+\\'" id) (file-exists-p file))
+      (orsb-error-hint 'not-found "Call restore without change_id to list recent changes."
+                       "No change %S in the journal" id))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8)) (insert-file-contents file))
+      (read (current-buffer)))))
+
+(defun orsb-core-changes (&optional limit)
+  "The LIMIT (default 10) most recent changes, newest first, as plists."
+  (let* ((dir (orsb-core--change-dir))
+         (files (seq-take (reverse (directory-files dir t "\\.eld\\'")) (or limit 10))))
+    (mapcar (lambda (f)
+              (let ((e (with-temp-buffer
+                         (let ((coding-system-for-read 'utf-8)) (insert-file-contents f))
+                         (read (current-buffer)))))
+                (list :id (plist-get e :id) :time (plist-get e :time) :tool (plist-get e :tool)
+                      :summary (plist-get e :summary) :restored (plist-get e :restored)
+                      :files (mapcar (lambda (x) (orsb-core--rel (car x))) (plist-get e :files)))))
+            files)))
+
+(defun orsb-core-restore (id &optional force dry-run)
+  "Undo change ID: put every file it touched back as it was before.
+Refused when a file changed again since, unless FORCE.  The restore is
+itself a change, so it can be undone too.  Returns (FILES . CHANGE)
+where FILES is a list of (FILE . ACTION)."
+  (let* ((entry (orsb-core--journal-read id))
+         (files (plist-get entry :files))
+         (conflicts (seq-filter (lambda (f) (not (equal (orsb-core--hash (orsb-core--disk-content (nth 0 f))) (nth 2 f))))
+                                files)))
+    (when (and conflicts (not force))
+      (orsb-error-hint 'refused "Pass force:true to restore anyway (later edits to these files are lost), or restore the later changes first."
+                       "Changed again since %s: %s" id
+                       (mapconcat (lambda (f) (orsb-core--rel (car f))) conflicts ", ")))
+    (let ((r (orsb-core-call-with-change
+              "restore" (format "restore %s" id) dry-run
+              (lambda ()
+                (let ((back (mapcar (lambda (f) (cons (nth 0 f) (nth 1 f))) files))
+                      (actions nil))
+                  (dolist (f files)
+                    (orsb-core--snapshot (nth 0 f))
+                    (orsb-core--plan (if (nth 1 f) 'write 'delete) (nth 0 f))
+                    (push (cons (nth 0 f) (cond ((null (nth 1 f)) "deleted")
+                                                ((file-exists-p (nth 0 f)) "restored")
+                                                (t "recreated")))
+                          actions))
+                  ;; all files first, then the db, so an id that moved between
+                  ;; files is never indexed twice
+                  (unless orsb-core-dry-run (orsb-core--put-back back))
+                  (nreverse actions))))))
+      (unless dry-run
+        (let ((file (expand-file-name (concat id ".eld") (orsb-core--change-dir))))
+          (let ((coding-system-for-write 'utf-8))
+            (with-temp-file file
+              (let ((print-length nil) (print-level nil))
+                (prin1 (plist-put entry :restored (cdr r)) (current-buffer)))))))
+      r)))
 
 (defun orsb-core-db-refresh (&rest files)
   "Bring the org-roam db up to date for FILES only (no full scan).
@@ -329,14 +668,16 @@ Blank lines that separated the body from the next heading stay after it."
 Matching is case-insensitive on the heading text (TODO keywords and tags
 ignored).  Signals `not-found' when there is no such heading."
   (orsb-core--with-node node
-    (let ((end (if (org-before-first-heading-p) (point-max)
-                 (save-excursion (org-end-of-subtree t t) (point))))
-          (found nil))
+    (let* ((start (point))
+           (end (if (org-before-first-heading-p) (point-max)
+                  (save-excursion (org-end-of-subtree t t) (point))))
+           (found nil))
       (while (and (not found) (re-search-forward org-heading-regexp end t))
         (when (orsb-core-string= (string-trim (org-get-heading t t t t)) (string-trim section))
           (setq found (point))))
       (unless found
-        (orsb-error 'not-found "No heading %S under %s" section (org-roam-node-title node)))
+        (orsb-error-hint 'not-found (orsb-core--sections-hint start end)
+                         "No heading %S under %s" section (org-roam-node-title node)))
       (goto-char found)
       (let ((b (orsb-core--body-bounds)))
         (if (>= (car b) (cdr b)) ""
@@ -390,16 +731,28 @@ ignored).  Signals `not-found' when there is no such heading."
 ;;;; Links
 
 (defun orsb-core-unlink (node target-id)
-  "Remove lines in NODE's body that link to TARGET-ID.  Return the count."
+  "Remove NODE's links to TARGET-ID and return how many there were.
+A line that holds nothing but the link (a bare bullet) is removed; in any
+other line only the link goes, replaced by its description, so the
+surrounding text survives."
   (let ((count 0))
     (orsb-core--with-node node
       (let* ((b (orsb-core--body-bounds))
              (end (copy-marker (cdr b)))
-             (rx (concat "^.*\\[\\[id:" (regexp-quote target-id) "\\].*\n?")))
+             (link-rx (concat "\\[\\[id:" (regexp-quote target-id) "\\]\\(?:\\[\\([^]]*\\)\\]\\)?\\]")))
         (goto-char (car b))
-        (while (re-search-forward rx end t)
-          (replace-match "")
-          (setq count (1+ count)))))
+        (while (re-search-forward link-rx end t)
+          (setq count (1+ count))
+          (let ((desc (or (match-string 1) ""))
+                (mb (match-beginning 0)) (me (match-end 0)))
+            (if (save-excursion
+                  (goto-char mb)
+                  (and (looking-back "^[ \t]*\\(?:[-+*][ \t]+\\)?" (line-beginning-position))
+                       (progn (goto-char me) (looking-at "[ \t]*$"))))
+                (delete-region (line-beginning-position) (min (point-max) (1+ (line-end-position))))
+              (delete-region mb me)
+              (goto-char mb)
+              (insert desc))))))
     (when (> count 0)
       (orsb-core--after-write (org-roam-node-file node)))
     count))
@@ -422,8 +775,8 @@ With INCLUDE-BODY, include the body text."
        (status . ,(cdr (assoc "STATUS" props)))
        (todo . ,(org-roam-node-todo node))
        (tags . ,(vconcat (org-roam-node-tags node)))
-       (properties . ,(or props :empty-object))
-       (keywords . ,(or (orsb-core-node-keywords node) :empty-object))
+       (properties . ,(or props (make-hash-table)))
+       (keywords . ,(or (orsb-core-node-keywords node) (make-hash-table)))
        (modified . ,(when mtime (format-time-string "%Y-%m-%dT%H:%M:%S%z" mtime))))
      (when include-body
        `((body . ,(orsb-core-node-body node)))))))
@@ -486,6 +839,7 @@ With INCLUDE-BODY, include the body text."
 (defun orsb-core--write-new-file (path drawer keywords body)
   "Create PATH with DRAWER (alist), KEYWORDS (alist) and BODY text.
 Returns the file-level node."
+  (orsb-core--snapshot path)
   (with-temp-file path
     (insert ":PROPERTIES:\n")
     (dolist (cell drawer)
@@ -609,16 +963,42 @@ when found or created."
              t)
      (t nil))))
 
-(defun orsb-core-update-section (node section content &optional mode)
+(defun orsb-core--heading-titles (&optional start end)
+  "Titles of the headings between START and END (default: whole buffer)."
+  (save-excursion
+    (goto-char (or start (point-min)))
+    (let (out)
+      (while (re-search-forward org-heading-regexp (or end (point-max)) t)
+        (push (string-trim (org-get-heading t t t t)) out))
+      (nreverse out))))
+
+(defun orsb-core--sections-hint (&optional start end)
+  "A hint naming the headings between START and END (default: the node at point).
+Point must be at a node in an org buffer."
+  (let* ((start (or start (if (org-before-first-heading-p) (point-min) (point))))
+         (end (or end (if (org-before-first-heading-p) (point-max)
+                        (save-excursion (org-end-of-subtree t t) (point)))))
+         (titles (orsb-core--heading-titles start end)))
+    (if titles
+        (format "Headings here: %s. Use one of these exactly, or call get_node to see the outline."
+                (mapconcat (lambda (h) (format "%S" h)) (seq-take (seq-uniq titles) 25) ", "))
+      "This note has no headings; leave section out to edit the body.")))
+
+(defun orsb-core-update-section (node section content &optional mode no-create)
   "Edit the body of heading SECTION in NODE's file with CONTENT.
 MODE is \"append\" (default), \"prepend\" or \"replace\".  The heading is
-created when missing."
+created when missing, unless NO-CREATE, which signals `not-found' naming
+the headings that do exist."
   (let ((mode (or mode "append")))
     (unless (member mode '("append" "prepend" "replace"))
       (orsb-error 'invalid-argument "mode must be append, prepend or replace"))
     (with-current-buffer (find-file-noselect (org-roam-node-file node))
+      (unless (derived-mode-p 'org-mode) (org-mode))
       (org-with-wide-buffer
-       (orsb-core--goto-section section t)
+       (unless (orsb-core--goto-section section (not no-create))
+         (orsb-error-hint 'not-found (concat (orsb-core--sections-hint (point-min) (point-max))
+                                             " To add it as a new heading, pass create_section:true.")
+                          "No heading %S in %s" section (org-roam-node-title node)))
        (let ((b (orsb-core--body-bounds)))
          (pcase mode
            ("replace" (delete-region (car b) (cdr b))
@@ -679,25 +1059,42 @@ directory with ARCHIVE).  Returns the resulting file path, or nil."
             (delete-region (point) (save-excursion (org-end-of-subtree t t) (point))))
           (orsb-core--after-write file)
           file)
-      (when-let ((buf (find-buffer-visiting file)))
-        (with-current-buffer buf (set-buffer-modified-p nil))
-        (kill-buffer buf))
       (if archive
           (let* ((dir (orsb-core--vault-file orsb-archive-directory))
                  (target (expand-file-name (file-name-nondirectory file) dir)))
-            (make-directory dir t)
-            (rename-file file target t)
-            (orsb-core-db-refresh file target)
+            (when (string-prefix-p (file-name-as-directory (file-truename dir)) (file-truename file))
+              (orsb-error 'refused "%s is already archived; pass archive:false to delete it" (orsb-core--rel file)))
+            (while (file-exists-p target)
+              (setq target (expand-file-name (format "%s-%d.%s" (file-name-base file) (random 10000)
+                                                     (file-name-extension file))
+                                             dir)))
+            (orsb-core--fs-rename file target)
             target)
-        (delete-file file)
-        (orsb-core-db-refresh file)
+        (orsb-core--fs-delete file)
         nil))))
 
+(defun orsb-core-links-to-p (node target-id)
+  "Whether NODE links to TARGET-ID.
+A file node counts its whole file, a heading its subtree."
+  (orsb-core--with-node node
+    (let ((end (if (org-before-first-heading-p) (point-max)
+                 (save-excursion (org-end-of-subtree t t) (point)))))
+      (and (search-forward (format "[[id:%s]" target-id) end t) t))))
+
 (defun orsb-core-link (node target &optional section)
-  "Add a bullet linking to TARGET in NODE's file, under SECTION if given."
+  "Add a bullet linking to TARGET in NODE's file, under SECTION if given.
+Returns `added', or `exists' (writing nothing) when NODE already links there."
+  (if (orsb-core-links-to-p node (org-roam-node-id target))
+      'exists
+    (orsb-core--link-1 node target section)
+    'added))
+
+(defun orsb-core--link-1 (node target section)
+  "Insert the link bullet to TARGET in NODE's file (under SECTION if given)."
   (let ((file (org-roam-node-file node))
         (link (format "- [[id:%s][%s]]" (org-roam-node-id target) (org-roam-node-title target))))
     (with-current-buffer (find-file-noselect file)
+      (unless (derived-mode-p 'org-mode) (org-mode))
       (org-with-wide-buffer
        (if section
            (progn (orsb-core--goto-section section t)
@@ -717,6 +1114,7 @@ With CREATE, make the file (with an :ID:) when it does not exist."
          (dir (orsb-core--vault-file orsb-daily-directory))
          (path (expand-file-name (concat date ".org") dir)))
     (when (and create (not (file-exists-p path)))
+      (orsb-core--snapshot path)
       (make-directory dir t)
       (with-temp-file path
         (insert (format ":PROPERTIES:\n:ID: %s\n:NODE-TYPE: daily\n:END:\n#+title: %s\n#+filetags: :daily:\n\n"
@@ -731,11 +1129,13 @@ With CREATE, make the file (with an :ID:) when it does not exist."
         (with-temp-buffer (insert-file-contents path) (buffer-string))
       "")))
 
-(defun orsb-core-add-daily-entry (title points &optional next-steps tags timestamp todo)
-  "Append a timestamped heading to today's daily note.
+(defun orsb-core-add-daily-entry (title points &optional next-steps tags timestamp todo date)
+  "Append a timestamped heading to the daily note of DATE (default today).
 POINTS and NEXT-STEPS are lists of strings, TAGS a list of tag strings.
 With TODO the heading is a TODO item and NEXT-STEPS become Subtasks."
-  (let ((path (orsb-core-daily-file nil t))
+  (when (and date (not (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" date)))
+    (orsb-error 'invalid-argument "date must be YYYY-MM-DD (got %S)" date))
+  (let ((path (orsb-core-daily-file date t))
         (stamp (or timestamp (format-time-string "%H:%M"))))
     (with-current-buffer (find-file-noselect path)
       (org-with-wide-buffer
@@ -904,6 +1304,647 @@ Returns a list of plists (:name :item :file)."
                                             (lambda (a b) (time-less-p b a)) published)
                                10)
           :ideas (seq-take ideas 10))))
+
+;;;; Outline
+
+(defun orsb-core-outline (node)
+  "The headings inside NODE (its file, or its subtree), as plists
+\(:title :level :id :todo), in document order.  A heading node's own
+heading is not included."
+  (orsb-core--with-node node
+    (let* ((file-p (org-before-first-heading-p))
+           (end (if file-p (point-max) (save-excursion (org-end-of-subtree t t) (point))))
+           (out nil))
+      (unless file-p (end-of-line))
+      (while (re-search-forward org-heading-regexp end t)
+        (save-excursion
+          (beginning-of-line)
+          (push (list :title (string-trim (org-get-heading t t t t))
+                      :level (org-current-level)
+                      :id (org-entry-get nil "ID")
+                      :todo (org-get-todo-state))
+                out)))
+      (nreverse out))))
+
+;;;; Planning (SCHEDULED / DEADLINE)
+
+(defun orsb-core--parse-date (date)
+  "DATE (YYYY-MM-DD, optionally with HH:MM) as (TIME . HAS-CLOCK).
+Signal `invalid-argument' otherwise."
+  (unless (and (stringp date)
+               (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\(?:[ T]\\([0-9]\\{1,2\\}\\):\\([0-9]\\{2\\}\\)\\)?\\'"
+                             (string-trim date)))
+    (orsb-error 'invalid-argument "dates are YYYY-MM-DD or \"YYYY-MM-DD HH:MM\" (got %S)" date))
+  (let* ((d (string-trim date))
+         (_ (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\(?:[ T]\\([0-9]\\{1,2\\}\\):\\([0-9]\\{2\\}\\)\\)?\\'" d))
+         (hh (match-string 4 d)) (mm (match-string 5 d)))
+    (cons (encode-time (list 0 (if mm (string-to-number mm) 0) (if hh (string-to-number hh) 0)
+                             (string-to-number (match-string 3 d)) (string-to-number (match-string 2 d))
+                             (string-to-number (match-string 1 d)) nil -1 nil))
+          (and hh t))))
+
+(defun orsb-core--org-timestamp (date)
+  "An active Org timestamp for DATE (see `orsb-core--parse-date')."
+  (let ((p (orsb-core--parse-date date)))
+    (let ((system-time-locale "C"))
+      (format-time-string (if (cdr p) "<%Y-%m-%d %a %H:%M>" "<%Y-%m-%d %a>") (car p)))))
+
+(defun orsb-core-set-planning (node what date)
+  "Set WHAT (`scheduled' or `deadline') on heading NODE to DATE.
+A nil or empty DATE removes it."
+  (when (= (org-roam-node-level node) 0)
+    (orsb-error-hint 'invalid-argument
+                     "Schedule a task heading inside the note, or set a DUE-DATE property on the note."
+                     "%s applies to headings (tasks), not to a whole note" what))
+  (let ((stamp (and date (not (string-blank-p date)) (orsb-core--org-timestamp date))))
+    (orsb-core--with-node node
+      (let ((org-log-reschedule nil) (org-log-redeadline nil)
+            (org-read-date-force-compatible-dates nil))
+        (if stamp
+            (org-add-planning-info what stamp)
+          (org-add-planning-info nil nil what)))))
+  (orsb-core--after-write (org-roam-node-file node))
+  t)
+
+(defun orsb-core-node-planning (node)
+  "Heading NODE's (:scheduled S :deadline D) as YYYY-MM-DD[ HH:MM] strings, or nil."
+  (unless (= (org-roam-node-level node) 0)
+    (orsb-core--with-node node
+      (let ((sch (org-entry-get nil "SCHEDULED")) (dl (org-entry-get nil "DEADLINE")))
+        (when (or sch dl)
+          (list :scheduled (and sch (orsb-core--stamp-date sch))
+                :deadline (and dl (orsb-core--stamp-date dl))))))))
+
+(defun orsb-core--stamp-date (stamp)
+  "YYYY-MM-DD (and HH:MM when present) from Org timestamp STAMP."
+  (when (and stamp (string-match "\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)\\(?:[^0-9>]*\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)\\)?" stamp))
+    (if (match-string 2 stamp) (concat (match-string 1 stamp) " " (match-string 2 stamp)) (match-string 1 stamp))))
+
+;;;; Aliases
+
+(defun orsb-core-node-aliases (node)
+  "NODE's ROAM_ALIASES as a list of strings."
+  (let ((raw (orsb-core-node-property node "ROAM_ALIASES")))
+    (and raw (split-string-and-unquote raw))))
+
+(defun orsb-core-set-aliases (node add remove)
+  "Add the strings in ADD to NODE's aliases and drop those in REMOVE.
+Return the aliases."
+  (let* ((current (orsb-core-node-aliases node))
+         (new (seq-uniq (append (seq-remove (lambda (a) (seq-some (lambda (r) (orsb-core-string= a r)) remove)) current)
+                                (seq-remove #'string-blank-p add)))))
+    (orsb-core--with-node node
+      (if new
+          (org-entry-put nil "ROAM_ALIASES" (combine-and-quote-strings new))
+        (org-entry-delete nil "ROAM_ALIASES")))
+    (orsb-core--after-write (org-roam-node-file node))
+    new))
+
+;;;; Backlinks
+
+(defun orsb-core-backlinks (node &optional subtree)
+  "Nodes in other files that link to NODE, as (ID TITLE FILE) lists.
+With SUBTREE, links to any node inside NODE (its file, or its subtree for
+a heading) count too."
+  (let* ((file (org-roam-node-file node))
+         (ids (if subtree
+                  (if (= (org-roam-node-level node) 0)
+                      (mapcar #'car (org-roam-db-query [:select [id] :from nodes :where (= file $s1)] file))
+                    (cons (org-roam-node-id node)
+                          (delq nil (mapcar (lambda (h) (plist-get h :id)) (orsb-core-outline node)))))
+                (list (org-roam-node-id node))))
+         (rows (apply #'append
+                      (mapcar (lambda (id)
+                                (org-roam-db-query [:select :distinct [nodes:id nodes:title nodes:file] :from links
+                                                    :inner-join nodes :on (= links:source nodes:id)
+                                                    :where (and (= links:dest $s1) (= links:type "id"))]
+                                                   id))
+                              ids))))
+    (seq-uniq (seq-remove (lambda (r) (equal (nth 2 r) file)) rows)
+              (lambda (a b) (equal (car a) (car b))))))
+
+;;;; Rename propagation
+
+(defun orsb-core-propagate-rename (node old-title new-title)
+  "Rewrite links to NODE whose text is OLD-TITLE so they read NEW-TITLE.
+Covers [[id:ID][OLD-TITLE]] descriptions in the files linking to NODE and
+plain [[OLD-TITLE]] title links anywhere in the vault.  Returns the list
+of files changed."
+  (let ((id (org-roam-node-id node))
+        (changed nil))
+    (unless (or (string-blank-p old-title) (orsb-core-string= old-title new-title))
+      (let* ((desc-rx (concat "\\[\\[id:" (regexp-quote id) "\\]\\[" (regexp-quote old-title) "\\]\\]"))
+            (name-rx (concat "\\[\\[" (regexp-quote old-title) "\\]\\]"))
+            (candidates (seq-uniq
+                         (append (mapcar #'car (org-roam-db-query
+                                                [:select :distinct [nodes:file] :from links
+                                                 :inner-join nodes :on (= links:source nodes:id)
+                                                 :where (= links:dest $s1)]
+                                                id))
+                                 (seq-filter (lambda (f)
+                                               (with-temp-buffer
+                                                 (insert-file-contents f)
+                                                 (let ((case-fold-search t)) (re-search-forward name-rx nil t))))
+                                             (org-roam-list-files))))))
+        (dolist (file candidates)
+          (with-current-buffer (find-file-noselect file)
+            (let ((hit nil) (case-fold-search t))
+              (org-with-wide-buffer
+               (goto-char (point-min))
+               (while (re-search-forward desc-rx nil t)
+                 (replace-match (format "[[id:%s][%s]]" id new-title) t t) (setq hit t))
+               (goto-char (point-min))
+               (while (re-search-forward name-rx nil t)
+                 (replace-match (format "[[%s]]" new-title) t t) (setq hit t)))
+              (when hit
+                (orsb-core--after-write file)
+                (push file changed)))))))
+    (nreverse changed)))
+
+;;;; Headings under a parent
+
+(defun orsb-core--goto-anchor (target &optional section)
+  "Move point to where children of TARGET go; return the anchor level.
+The anchor is the heading titled SECTION inside TARGET when given (a
+`not-found' error names the headings that exist), else TARGET's own
+heading (level N), or the file (level 0).  Must run in TARGET's buffer."
+  (goto-char (if (= (org-roam-node-level target) 0) (point-min) (orsb-core--heading-point target)))
+  (let* ((file-p (= (org-roam-node-level target) 0))
+         (start (point))
+         (end (if file-p (point-max) (save-excursion (org-end-of-subtree t t) (point)))))
+    (if section
+        (let ((found nil))
+          (unless file-p (end-of-line))
+          (while (and (not found) (re-search-forward org-heading-regexp end t))
+            (when (orsb-core-string= (string-trim (org-get-heading t t t t)) (string-trim section))
+              (setq found (line-beginning-position))))
+          (unless found
+            (orsb-error-hint 'not-found (orsb-core--sections-hint start end)
+                             "No heading %S in %s" section (org-roam-node-title target)))
+          (goto-char found)
+          (org-current-level))
+      (if file-p 0 (org-current-level)))))
+
+(defun orsb-core--shift-levels (text delta)
+  "TEXT with every heading moved DELTA levels (never above level 1)."
+  (if (= delta 0) text
+    (replace-regexp-in-string
+     "^\\(\\*+\\)\\([ \t]\\)"
+     (lambda (m)
+       (let ((n (length (match-string 1 m))))
+         (concat (make-string (max 1 (+ n delta)) ?*) (match-string 2 m))))
+     text t t)))
+
+(defun orsb-core--insert-under-anchor (anchor-level text)
+  "Insert subtree TEXT as the last child of the anchor at point.
+TEXT's top heading is level 1."
+  (let ((text (orsb-core--shift-levels text anchor-level)))
+    (if (= anchor-level 0)
+        (goto-char (point-max))
+      (org-end-of-subtree t t))
+    (unless (bolp) (insert "\n"))
+    (unless (or (bobp) (save-excursion (forward-line -1) (looking-at "^[ \t]*$")))
+      (insert "\n"))
+    (let ((start (point)))
+      (insert text)
+      (unless (string-suffix-p "\n" text) (insert "\n"))
+      start)))
+
+(defun orsb-core-insert-heading (parent heading &rest args)
+  "Add HEADING with a fresh :ID: as the last child of PARENT.
+Return the new node.
+ARGS is a plist: :section (a heading inside PARENT to nest under instead),
+:body, :properties (alist), :todo, :tags (list), :scheduled, :deadline."
+  (unless (and (stringp heading) (not (string-blank-p heading)))
+    (orsb-error 'invalid-argument "title must be a non-empty string"))
+  (let* ((id (org-id-new))
+         (file (org-roam-node-file parent))
+         (todo (plist-get args :todo))
+         (tags (plist-get args :tags))
+         (body (plist-get args :body))
+         (planning (string-join
+                    (delq nil (list (when-let ((d (plist-get args :scheduled))) (unless (string-blank-p d) (concat "SCHEDULED: " (orsb-core--org-timestamp d))))
+                                    (when-let ((d (plist-get args :deadline))) (unless (string-blank-p d) (concat "DEADLINE: " (orsb-core--org-timestamp d))))))
+                    " "))
+         (text (concat "* " (if (and todo (not (string-blank-p todo))) (concat (upcase todo) " ") "")
+                       heading
+                       (if tags (concat " :" (string-join tags ":") ":") "")
+                       "\n"
+                       (if (string-empty-p planning) "" (concat planning "\n"))
+                       ":PROPERTIES:\n:ID: " id "\n"
+                       (mapconcat (lambda (c) (format ":%s: %s\n" (orsb-core--normalize-key (car c)) (cdr c)))
+                                  (plist-get args :properties) "")
+                       ":END:\n"
+                       (if (and body (not (string-blank-p body)))
+                           (concat body (if (string-suffix-p "\n" body) "" "\n"))
+                         ""))))
+    (dolist (tag tags)
+      (unless (and (stringp tag) (string-match-p "\\`[[:alnum:]_@#%-]+\\'" tag))
+        (orsb-error 'invalid-argument "Invalid tag %S" tag)))
+    (with-current-buffer (find-file-noselect file)
+      (unless (derived-mode-p 'org-mode) (org-mode))
+      (org-with-wide-buffer
+       (orsb-core--insert-under-anchor (orsb-core--goto-anchor parent (plist-get args :section)) text)))
+    (orsb-core--after-write file)
+    (if orsb-core-dry-run
+        id
+      (orsb-core-resolve id))))
+
+;;;; Checkboxes
+
+(defconst orsb-core--checkbox-rx
+  "^\\(?:[ \t]*[-+]\\|[ \t]+\\*\\|[ \t]*[0-9]+[.)]\\)[ \t]+\\[\\([ xX-]\\)\\][ \t]+\\(.*?\\)[ \t]*$"
+  "A plain-list item with a checkbox: group 1 the mark, group 2 the text.")
+
+(defun orsb-core--checkboxes-in (start end)
+  "Checkbox items between START and END in the current buffer, as plists
+\(:index :checked :text :pos :heading), index counted from the start of the buffer."
+  (save-excursion
+    (let ((index 0) (out nil))
+      (goto-char (point-min))
+      (while (re-search-forward orsb-core--checkbox-rx nil t)
+        (setq index (1+ index))
+        (let ((pos (match-beginning 0)))
+          (when (and (>= pos start) (< pos end))
+            (push (list :index index
+                        :checked (not (equal (match-string 1) " "))
+                        :text (match-string-no-properties 2)
+                        :pos pos
+                        :heading (save-excursion
+                                   (goto-char pos)
+                                   (unless (org-before-first-heading-p)
+                                     (org-back-to-heading t)
+                                     (string-trim (org-get-heading t t t t)))))
+                  out))))
+      (nreverse out))))
+
+(defun orsb-core-checkboxes (node &optional section)
+  "Checkbox items in NODE (file or subtree), or in its heading SECTION."
+  (orsb-core--with-node node
+    (let* ((level (orsb-core--goto-anchor node section))
+           (start (point))
+           (end (if (= level 0) (point-max) (save-excursion (org-end-of-subtree t t) (point)))))
+      (orsb-core--checkboxes-in start end))))
+
+(defun orsb-core-set-checkbox (node &rest args)
+  "Tick (or untick) one checkbox in NODE and return its plist with :was.
+ARGS is a plist: :item (text to match, case-insensitive; an exact match
+wins over a partial one), :index (position in the whole file, as
+`orsb-core-tasks' reports it), :checked (default t), :section (limit the
+text match to that heading).  Several matches signal `invalid-argument'
+listing them."
+  (let* ((item (plist-get args :item))
+         (index (plist-get args :index))
+         (checked (if (plist-member args :checked) (plist-get args :checked) t))
+         (target nil))
+    (unless (or item index)
+      (orsb-error 'invalid-argument "give item (the checkbox text) or index"))
+    (orsb-core--with-node node
+      (let* ((boxes (if index
+                        (let ((all (orsb-core--checkboxes-in (point-min) (point-max))))
+                          (or (seq-filter (lambda (b) (= (plist-get b :index) index)) all)
+                              (orsb-error-hint 'not-found "get_tasks lists each checkbox with its index."
+                                               "No checkbox number %d in %s (it has %d)" index
+                                               (orsb-core--rel (org-roam-node-file node)) (length all))))
+                      (orsb-core-checkboxes node (plist-get args :section))))
+             (matches (if index boxes
+                        (let* ((needle (downcase (string-trim item)))
+                               (exact (seq-filter (lambda (b) (string= (downcase (plist-get b :text)) needle)) boxes)))
+                          (or exact (seq-filter (lambda (b) (string-search needle (downcase (plist-get b :text)))) boxes))))))
+        (cond
+         ((null matches)
+          (orsb-error-hint 'not-found
+                           (if boxes
+                               (format "Checkboxes here: %s"
+                                       (mapconcat (lambda (b) (format "%d %S" (plist-get b :index) (plist-get b :text)))
+                                                  (seq-take boxes 12) "; "))
+                             "This note has no checkboxes.")
+                           "No checkbox matching %S in %s" item (org-roam-node-title node)))
+         ((> (length matches) 1)
+          (orsb-error-hint 'invalid-argument "Pass index (the number before each item) to pick one."
+                           "%d checkboxes match %S: %s" (length matches) item
+                           (mapconcat (lambda (b) (format "%d %S" (plist-get b :index) (plist-get b :text)))
+                                      (seq-take matches 12) "; "))))
+        (setq target (car matches))
+        (goto-char (plist-get target :pos))
+        (re-search-forward "\\[\\([ xX-]\\)\\]" (line-end-position))
+        (replace-match (if checked "X" " ") t t nil 1)
+        (org-update-checkbox-count-maybe 'all)))
+    (if (eq (and checked t) (plist-get target :checked))
+        ;; already in that state: nothing to save
+        (orsb-core--with-node node (set-buffer-modified-p nil))
+      (orsb-core--after-write (org-roam-node-file node)))
+    (append (list :was (plist-get target :checked)) (plist-put (copy-sequence target) :checked (and checked t)))))
+
+;;;; Tasks
+
+(defun orsb-core--todo-sets (&optional text)
+  "The (OPEN . DONE) TODO keyword lists for a file whose content is TEXT.
+#+TODO:, #+SEQ_TODO: and #+TYP_TODO: lines win over `org-todo-keywords'."
+  (let ((seqs nil))
+    (when text
+      (let ((pos 0))
+        (while (string-match "^#\\+\\(?:SEQ_\\|TYP_\\)?TODO:[ \t]*\\(.*\\)$" text pos)
+          (let ((words (match-string 1 text)))
+            (setq pos (match-end 0))
+            (push (split-string words "[ \t]+" t) seqs)))))
+    (unless seqs
+      (setq seqs (mapcar (lambda (s) (if (memq (car-safe s) '(sequence type)) (cdr s) s))
+                         (if (stringp (car org-todo-keywords)) (list org-todo-keywords) org-todo-keywords))))
+    (let (open done)
+      (dolist (sq seqs)
+        (let* ((words (mapcar (lambda (w) (replace-regexp-in-string "(.*)\\'" "" w)) sq))
+               (bar (seq-position words "|")))
+          (if bar
+              (progn (setq open (append open (seq-take words bar)))
+                     (setq done (append done (seq-drop words (1+ bar)))))
+            (setq open (append open (butlast words)))
+            (setq done (append done (last words))))))
+      (cons (seq-uniq (delete "" open)) (seq-uniq (delete "" done))))))
+
+(defun orsb-core--file-tasks (file)
+  "TODO headings and checkboxes in FILE, as plists, in document order."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let* ((sets (orsb-core--todo-sets (buffer-string)))
+           (open (car sets)) (done (cdr sets))
+           (kw-rx (concat "\\`\\(" (regexp-opt (append open done)) "\\)\\(?:[ \t]+\\|\\'\\)"))
+           (file-id (save-excursion
+                      (goto-char (point-min))
+                      (when (looking-at "^[ \t]*:PROPERTIES:")
+                        (let ((end (save-excursion (re-search-forward "^[ \t]*:END:" nil t))))
+                          (and (re-search-forward "^[ \t]*:ID:[ \t]+\\(\\S-+\\)" end t) (match-string 1))))))
+           (title (save-excursion (goto-char (point-min))
+                                  (and (re-search-forward "^#\\+title:[ \t]*\\(.*\\)$" nil t) (string-trim (match-string 1)))))
+           (heading nil) (heading-id nil) (sched nil) (dline nil) (prio nil)
+           (index 0) (line 0) (out nil))
+      (goto-char (point-min))
+      (while (not (eobp))
+        (setq line (1+ line))
+        (cond
+         ((looking-at "^\\(\\*+\\)[ \t]+\\(.*?\\)[ \t]*$")
+          (let* ((raw (match-string 2))
+                 (kw (and (string-match kw-rx raw) (match-string 1 raw)))
+                 (rest (if kw (substring raw (match-end 0)) raw))
+                 (p (and (string-match "\\`\\[#\\([A-Z0-9]\\)\\][ \t]*" rest) (match-string 1 rest)))
+                 (rest (if p (substring rest (match-end 0)) rest))
+                 (text (string-trim (replace-regexp-in-string "[ \t]+:[[:alnum:]_@#%:]+:[ \t]*\\'" "" rest))))
+            (setq heading text heading-id nil sched nil dline nil prio p)
+            ;; planning line and drawer right below the heading
+            (save-excursion
+              (forward-line 1)
+              (when (looking-at "^[ \t]*\\(?:SCHEDULED\\|DEADLINE\\|CLOSED\\):")
+                (let ((l (buffer-substring (line-beginning-position) (line-end-position))))
+                  (when (string-match "SCHEDULED:[ \t]*\\(<[^>]+>\\)" l) (setq sched (orsb-core--stamp-date (match-string 1 l))))
+                  (when (string-match "DEADLINE:[ \t]*\\(<[^>]+>\\)" l) (setq dline (orsb-core--stamp-date (match-string 1 l)))))
+                (forward-line 1))
+              (when (looking-at "^[ \t]*:PROPERTIES:")
+                (let ((end (save-excursion (re-search-forward "^[ \t]*:END:" nil t))))
+                  (when (and end (re-search-forward "^[ \t]*:ID:[ \t]+\\(\\S-+\\)" end t))
+                    (setq heading-id (match-string 1))))))
+            (when kw
+              (push (list :kind "todo" :text text :state kw :done (and (member kw done) t)
+                          :file file :file_id file-id :title title :heading text :heading_id heading-id
+                          :scheduled sched :deadline dline :priority p :line line)
+                    out))))
+         ((looking-at orsb-core--checkbox-rx)
+          (setq index (1+ index))
+          (push (list :kind "checkbox" :text (match-string-no-properties 2)
+                      :state (if (equal (match-string 1) " ") "[ ]" (format "[%s]" (match-string 1)))
+                      :done (not (equal (match-string 1) " "))
+                      :file file :file_id file-id :title title :heading heading :heading_id heading-id
+                      :index index :scheduled sched :deadline dline :priority prio :line line)
+                out)))
+        (forward-line 1))
+      (nreverse out))))
+
+(defun orsb-core-tasks (&optional files)
+  "Tasks (TODO headings and checkboxes) in FILES.
+FILES defaults to every note outside the archive."
+  (let ((archive (file-name-as-directory (file-truename (orsb-core--vault-file orsb-archive-directory)))))
+    (apply #'append
+           (mapcar (lambda (f) (condition-case nil (orsb-core--file-tasks f) (error nil)))
+                   (or files
+                       (seq-remove (lambda (f) (string-prefix-p archive (file-truename f)))
+                                   (org-roam-list-files)))))))
+
+;;;; Moving and merging
+
+(defun orsb-core--subtree-text ()
+  "Text and level of the subtree at point (point at its heading)."
+  (let ((start (point))
+        (end (save-excursion (org-end-of-subtree t t) (point))))
+    (list (buffer-substring-no-properties start end) (org-current-level) start end)))
+
+(defun orsb-core-move-node (node target &optional section)
+  "Move heading NODE (with everything under it) to be the last child of TARGET.
+TARGET is a note or a heading; SECTION names a heading inside TARGET to
+go under instead.  The heading keeps its :ID:, so links still resolve."
+  (when (= (org-roam-node-level node) 0)
+    (orsb-error-hint 'invalid-argument "To fold a whole note into another, use merge_nodes."
+                     "id must be a heading; %s is a whole note" (org-roam-node-title node)))
+  (when (equal (org-roam-node-id node) (org-roam-node-id target))
+    (orsb-error 'invalid-argument "Cannot move a heading under itself"))
+  (let ((src (org-roam-node-file node))
+        (dst (org-roam-node-file target))
+        text)
+    ;; refuse a target inside the moved subtree
+    (when (and (equal src dst) (> (org-roam-node-level target) 0))
+      (orsb-core--with-node node
+        (let ((end (save-excursion (org-end-of-subtree t t) (point)))
+              (tpos (orsb-core--heading-point target)))
+          (when (and (> tpos (point)) (< tpos end))
+            (orsb-error 'invalid-argument "Cannot move a heading under its own child")))))
+    ;; cut first (and save), so the id is never in two files at once
+    (orsb-core--with-node node
+      (pcase-let ((`(,txt ,level ,start ,end) (orsb-core--subtree-text)))
+        (setq text (orsb-core--shift-levels txt (- 1 level)))
+        (delete-region start end)))
+    (orsb-core--after-write src)
+    (with-current-buffer (find-file-noselect dst)
+      (unless (derived-mode-p 'org-mode) (org-mode))
+      (org-with-wide-buffer
+       (orsb-core--insert-under-anchor (orsb-core--goto-anchor target section) text)))
+    (orsb-core--after-write dst)
+    t))
+
+(defun orsb-core-promote-node (node &optional type leave-link)
+  "Turn heading NODE into a note of its own of TYPE.
+TYPE defaults to its NODE-TYPE property, else \"note\".
+The new note keeps the heading's :ID: and properties, so links still
+resolve; with LEAVE-LINK a bullet linking to it stays where the heading
+was.  Returns the new file's path."
+  (when (= (org-roam-node-level node) 0)
+    (orsb-error 'invalid-argument "%s is already a note" (org-roam-node-title node)))
+  (let ((src (org-roam-node-file node))
+        title id props tags body type*)
+    (orsb-core--with-node node
+      (setq title (string-trim (org-get-heading t t t t))
+            id (org-entry-get nil "ID")
+            tags (org-get-tags nil t)
+            props (seq-remove (lambda (c) (or (member (car c) '("ID" "CATEGORY" "BLOCKED" "ITEM" "FILE" "TODO" "PRIORITY" "TAGS" "ALLTAGS"
+                                                                "TIMESTAMP" "TIMESTAMP_IA" "CLOCKSUM" "CLOCKSUM_T" "CLOSED" "DEADLINE" "SCHEDULED"))
+                                              (string-prefix-p "EMBEDDING" (car c))))
+                              (org-entry-properties nil 'standard)))
+      (let ((sch (org-entry-get nil "SCHEDULED")) (dl (org-entry-get nil "DEADLINE")))
+        ;; planning has no place on a whole note: a deadline becomes DUE-DATE,
+        ;; a scheduled date a line of text, so neither is lost
+        (when (and dl (not (assoc "DUE-DATE" props)))
+          (setq props (append props `(("DUE-DATE" . ,(orsb-core--stamp-date dl))))))
+        (when sch (setq sch (format "Scheduled: [%s]\n" (orsb-core--stamp-date sch))))
+        (pcase-let* ((`(,_txt ,level ,start ,end) (orsb-core--subtree-text))
+                     (from (save-excursion (org-end-of-meta-data t) (point))))
+          (setq body (concat (or sch "")
+                             (orsb-core--shift-levels (buffer-substring-no-properties (min from end) end) (- level))))
+          (delete-region start end)
+          (when leave-link
+            (goto-char start)
+            (insert (format "- [[id:%s][%s]]\n" id title))))))
+    (setq type* (or type (cdr (assoc "NODE-TYPE" props)) "note"))
+    (unless (assoc type* orsb-directories)
+      (orsb-error 'invalid-argument "node_type must be one of %s" (string-join (mapcar #'car orsb-directories) ", ")))
+    (orsb-core--after-write src)
+    (let ((path (orsb-core--new-file-path title type*)))
+      (if orsb-core-dry-run
+          (progn (orsb-core--snapshot path)
+                 (orsb-core--plan 'write path))
+        (orsb-core--write-new-file
+         path
+         (append `(("ID" . ,id) ("NODE-TYPE" . ,type*))
+                 (seq-remove (lambda (c) (equal (car c) "NODE-TYPE")) props))
+         `(("title" . ,title) ("filetags" . ,(and tags (concat ":" (string-join tags ":") ":"))))
+         (string-trim-left body "\n+")))
+      path)))
+
+(defun orsb-core-merge-node (source target &optional section)
+  "Fold note SOURCE into TARGET as a heading, then remove SOURCE's file.
+The heading carries SOURCE's title, :ID:, properties and tags, so every
+link to SOURCE now lands on the merged section; nothing has to be
+rewritten.  SECTION names a heading inside TARGET to go under.  Returns
+the number of links from other notes that still resolve."
+  (unless (= (org-roam-node-level source) 0)
+    (orsb-error-hint 'invalid-argument "To move a heading, use move_node."
+                     "id must be a whole note; %s is a heading" (org-roam-node-title source)))
+  (when (equal (org-roam-node-file source) (org-roam-node-file target))
+    (orsb-error 'invalid-argument "Cannot merge a note into itself"))
+  (let* ((src (org-roam-node-file source))
+         (dst (org-roam-node-file target))
+         (backlinks (length (orsb-core-backlinks source)))
+         (title (org-roam-node-title source))
+         (tags (orsb-core-node-local-tags source))
+         (props (orsb-core--with-node source
+                  (seq-remove (lambda (c) (or (member (car c) '("ID" "CATEGORY" "BLOCKED" "ITEM" "FILE" "TODO" "PRIORITY" "TAGS" "ALLTAGS"
+                                                                "TIMESTAMP" "TIMESTAMP_IA" "CLOCKSUM" "CLOCKSUM_T" "CLOSED" "DEADLINE" "SCHEDULED"))
+                                                (string-prefix-p "EMBEDDING" (car c))))
+                              (org-entry-properties nil 'standard))))
+         (body (orsb-core-node-body source))
+         (text (concat "* " title (if tags (concat " :" (string-join tags ":") ":") "") "\n"
+                       ":PROPERTIES:\n:ID: " (org-roam-node-id source) "\n"
+                       (mapconcat (lambda (c) (format ":%s: %s\n" (car c) (cdr c))) props "")
+                       ":END:\n"
+                       (orsb-core--shift-levels (string-trim-left body "\n+") 1))))
+    ;; remove the source first, so the id is never indexed twice
+    (orsb-core--fs-delete src)
+    (with-current-buffer (find-file-noselect dst)
+      (unless (derived-mode-p 'org-mode) (org-mode))
+      (org-with-wide-buffer
+       (orsb-core--insert-under-anchor (orsb-core--goto-anchor target section) text)))
+    (orsb-core--after-write dst)
+    backlinks))
+
+;;;; Vault health
+
+(defun orsb-core-health ()
+  "Vault health as a plist: :orphans (file nodes with no id links in or out,
+daily notes and the archive excluded), :broken (id links to missing nodes,
+as (SOURCE-FILE . DEST-ID)), :duplicates (titles held by several notes,
+as (TITLE . IDS))."
+  (let* ((rows (org-roam-db-query [:select [id file level title] :from nodes]))
+         (node-file (make-hash-table :test 'equal))
+         (has-link (make-hash-table :test 'equal))
+         (broken nil) (titles (make-hash-table :test 'equal))
+         (archive (file-name-as-directory (file-truename (orsb-core--vault-file orsb-archive-directory))))
+         (daily (file-name-as-directory (file-truename (orsb-core--vault-file orsb-daily-directory)))))
+    (dolist (r rows) (puthash (nth 0 r) (nth 1 r) node-file))
+    (dolist (l (org-roam-db-query [:select [source dest] :from links :where (= type "id")]))
+      (let ((sf (gethash (car l) node-file)) (df (gethash (cadr l) node-file)))
+        (cond ((null df) (when sf (push (cons sf (cadr l)) broken)))
+              ((and sf (not (equal sf df))) (puthash sf t has-link) (puthash df t has-link)))))
+    (dolist (r rows)
+      (when (and (= (nth 2 r) 0) (not (string-prefix-p archive (file-truename (nth 1 r)))))
+        (puthash (downcase (or (nth 3 r) "")) (cons (nth 0 r) (gethash (downcase (or (nth 3 r) "")) titles)) titles)))
+    (list :orphans (seq-filter (lambda (r) (and (= (nth 2 r) 0)
+                                                (not (gethash (nth 1 r) has-link))
+                                                (not (string-prefix-p archive (file-truename (nth 1 r))))
+                                                (not (string-prefix-p daily (file-truename (nth 1 r))))))
+                               rows)
+          :broken (nreverse broken)
+          :duplicates (let (out) (maphash (lambda (k v) (when (> (length v) 1) (push (cons k (reverse v)) out))) titles) out))))
+
+;;;; Inbox entries with refs
+
+(defun orsb-core--inbox-lines (date)
+  "Inbox bullets of DATE's daily note, or nil.
+Each is a plist (:ref :date :text :resolved :pos)."
+  (let ((path (orsb-core-daily-file date)))
+    (when (file-exists-p path)
+      (with-current-buffer (find-file-noselect path)
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (when (re-search-forward (format "^\\* %s[ \t]*$" (regexp-quote orsb-inbox-heading)) nil t)
+           (let ((end (save-excursion (or (and (re-search-forward "^\\* " nil t) (match-beginning 0)) (point-max))))
+                 (n 0) (out nil))
+             (forward-line 1)
+             (while (re-search-forward "^[ \t]*- \\(\\[\\([ xX]\\)\\] \\)?\\(.*\\)$" end t)
+               (setq n (1+ n))
+               (push (list :ref (format "%s:%d" date n) :date date
+                           :text (match-string-no-properties 3)
+                           :resolved (and (match-string 2) (not (equal (match-string 2) " ")))
+                           :pos (match-beginning 0))
+                     out))
+             (nreverse out))))))))
+
+(defun orsb-core-inbox (&optional days include-resolved)
+  "Inbox entries of the last DAYS days (default 7), as plists with :ref.
+Resolved entries are left out unless INCLUDE-RESOLVED."
+  (let (out)
+    (dotimes (i (or days 7))
+      (let ((date (format-time-string "%Y-%m-%d" (time-subtract (current-time) (days-to-time i)))))
+        (push (seq-filter (lambda (e) (or include-resolved (not (plist-get e :resolved))))
+                          (orsb-core--inbox-lines date))
+              out)))
+    (apply #'append out)))
+
+(defun orsb-core-resolve-inbox (ref &optional target section)
+  "Mark inbox entry REF (DATE:N) done; with TARGET, also copy it there and link it.
+The entry is ticked ([X]) rather than removed, so other refs stay valid.
+SECTION is a heading in TARGET for the copied bullet.  Returns the entry plist."
+  (unless (and (stringp ref) (string-match "\\`\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\):\\([0-9]+\\)\\'" ref))
+    (orsb-error-hint 'invalid-argument "Refs look like 2026-11-19:3; get_review lists open inbox entries with theirs."
+                     "Not an inbox ref: %S" ref))
+  (let* ((date (match-string 1 ref))
+         (entry (seq-find (lambda (e) (equal (plist-get e :ref) ref)) (orsb-core--inbox-lines date)))
+         (path (orsb-core-daily-file date)))
+    (unless entry
+      (orsb-error-hint 'not-found "get_review lists open inbox entries with their refs."
+                       "No inbox entry %s" ref))
+    (when (plist-get entry :resolved)
+      (orsb-error 'refused "Inbox entry %s is already resolved" ref))
+    (when target
+      (let ((text (string-trim (replace-regexp-in-string "\\`\\[[0-9]\\{4\\}-[^]]*\\][ \t]*" "" (plist-get entry :text)))))
+        (if section
+            (orsb-core-update-section target section (concat "- " text) "append" t)
+          (orsb-core-append-body target (concat "- " text)))))
+    (with-current-buffer (find-file-noselect path)
+      (org-with-wide-buffer
+       (goto-char (plist-get entry :pos))
+       (when (re-search-forward "^\\([ \t]*- \\)\\(\\[ \\] \\)?" (line-end-position) t)
+         (replace-match "\\1[X] " t nil))
+       (when target
+         (end-of-line)
+         (insert (format " → filed to [[id:%s][%s]]" (org-roam-node-id target) (org-roam-node-title target))))))
+    (orsb-core--after-write path)
+    entry))
 
 (provide 'orsb-core)
 ;;; orsb-core.el ends here
