@@ -803,9 +803,10 @@ With INCLUDE-BODY, include the body text."
 
 (defcustom orsb-replace-backup t
   "Non-nil writes a timestamped .bak copy before a whole-note replace.
-The copy sits beside the note.  Every write is also journaled and can be undone with `restore', so a site
-where a writer replaces notes often (a generated note rewritten every night)
-can set this to nil to keep the vault free of .bak files."
+The copy sits beside the note.  Every write is also journaled and can
+be undone with `restore', so a site where a writer replaces notes often
+(a generated note rewritten every night) can set this to nil to keep
+the vault free of .bak files."
   :type 'boolean
   :group 'orsb)
 
