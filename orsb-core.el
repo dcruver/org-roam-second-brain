@@ -801,6 +801,14 @@ With INCLUDE-BODY, include the body text."
   :type 'string
   :group 'orsb)
 
+(defcustom orsb-replace-backup t
+  "Non-nil writes a timestamped .bak copy before a whole-note replace.
+The copy sits beside the note.  Every write is also journaled and can be undone with `restore', so a site
+where a writer replaces notes often (a generated note rewritten every night)
+can set this to nil to keep the vault free of .bak files."
+  :type 'boolean
+  :group 'orsb)
+
 (defcustom orsb-inbox-heading "Inbox"
   "Heading in the daily note that collects inbox entries."
   :type 'string
@@ -1024,7 +1032,7 @@ the headings that do exist."
   "Replace everything after NODE's drawer and keywords with CONTENT.
 Refused (`refused') when CONTENT would drop a level-1 heading or shrink a
 note of more than 200 characters below half its size, unless FORCE.  A
-timestamped .bak sibling is written first."
+timestamped .bak sibling is written first when `orsb-replace-backup' is set."
   (let ((file (org-roam-node-file node)))
     (with-current-buffer (find-file-noselect file)
       (org-with-wide-buffer
@@ -1039,7 +1047,8 @@ timestamped .bak sibling is written first."
            (orsb-error 'refused "whole-note replace would %s; re-read the note and resend the full body, or pass force:true"
                        (if dropped (format "drop heading(s): %s" (string-join dropped ", "))
                          (format "shrink the note from %d to %d characters" (length old) (length content)))))
-         (copy-file file (format "%s.bak-%s" file (format-time-string "%s")) t)
+         (when orsb-replace-backup
+           (copy-file file (format "%s.bak-%s" file (format-time-string "%s")) t))
          (delete-region (car b) (cdr b))
          (goto-char (car b))
          (insert content)

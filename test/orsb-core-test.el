@@ -250,7 +250,16 @@ Files without an :ID: are not org-roam nodes.
         (should (string-match-p "\\`:PROPERTIES:\n:ID: 1784854105" text))
         (should (string-match-p "^#\\+title: Project Backlog$" text)))
       (should (seq-some (lambda (f) (string-match-p "\\.bak-" f))
-                        (directory-files (expand-file-name "projects" org-roam-directory)))))))
+                        (directory-files (expand-file-name "projects" org-roam-directory))))
+      ;; with the backup switched off a replace leaves no further .bak file
+      (let* ((dir (expand-file-name "projects" org-roam-directory))
+             (count (lambda () (length (seq-filter (lambda (f) (string-match-p "\\.bak-" f)) (directory-files dir)))))
+             (before (funcall count))
+             (orsb-replace-backup nil))
+        (sleep-for 1.1)
+        (orsb-core-replace-file-body (orsb-core-resolve "1784854105") "* Purpose\n* Next Actions\n* Materials\n* Brand New\nagain\n" t)
+        (should (string-match-p "again" (orsb-test--file "projects/project-backlog-1784854105.org")))
+        (should (= before (funcall count)))))))
 
 (ert-deftest orsb-core-delete-archive-and-link ()
   (orsb-test-with-vault
