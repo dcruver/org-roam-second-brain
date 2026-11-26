@@ -31,7 +31,8 @@
 ;;   * Template    the body a new note of this type starts with
 ;;
 ;; Defaults, keyword values and the template may use %DATE%, %TITLE% and
-;; %SLUG%, filled in when a note is created.
+;; %SLUG%, filled in when a note is created.  %BODY% in the template is
+;; where the text given at creation goes.
 ;;
 ;; The file has no org-roam :ID:, so it is not a note.
 ;;
@@ -634,11 +635,14 @@ An alist from the fourth column of the Properties table."
 
 (defun orsb-schema-new-body (schema title &optional body time)
   "Return the body a new note of SCHEMA titled TITLE starts with.
-The template with %DATE%, %TITLE% and %SLUG% filled in; BODY, when given,
-goes before the template's first heading."
+The template with %DATE%, %TITLE% and %SLUG% filled in.  BODY, when given,
+goes where the template says %BODY%; in a template that does not say, it
+goes before the first heading."
   (let* ((tpl (orsb-schema-fill (or (alist-get 'template schema) "") title time))
          (body (and body (not (string-blank-p body)) (string-trim-right body))))
-    (cond ((string-empty-p tpl) body)
+    (cond ((string-search "%BODY%" tpl)
+           (string-trim-right (replace-regexp-in-string "%BODY%" (or body "") tpl t t)))
+          ((string-empty-p tpl) body)
           ((not body) tpl)
           (t (concat body "\n\n" tpl)))))
 

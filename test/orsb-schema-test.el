@@ -134,6 +134,15 @@ As of %DATE%.
   ;; an empty Template heading: an empty template, which overrides
   (should (equal (alist-get 'template (orsb-schema-parse-string orsb-schema-test--blog-file)) "")))
 
+(ert-deftest orsb-schema-new-body-puts-the-text-where-the-template-says ()
+  (let ((plain '((template . "* Current state\nAs of %DATE%.\n* Log")))
+        (placed '((template . "* Draft\n%BODY%\n* Research"))))
+    (should (string-match-p "\\`Lead\\.\n\n\\* Current state\nAs of [0-9-]+\\.\n\\* Log\\'" (orsb-schema-new-body plain "T" "Lead.\n")))
+    (should (equal (orsb-schema-new-body placed "T" "The post.") "* Draft\nThe post.\n* Research"))
+    (should (equal (orsb-schema-new-body placed "T" nil) "* Draft\n\n* Research"))
+    (should (equal (orsb-schema-new-body nil "T" "Just text") "Just text"))
+    (should-not (orsb-schema-new-body nil "T" nil))))
+
 (ert-deftest orsb-schema-a-folder-inherits-and-overrides ()
   (orsb-schema-test--with-vault
     (let ((project (orsb-schema-for-directory (expand-file-name "projects" root) root))
