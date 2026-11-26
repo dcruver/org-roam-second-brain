@@ -95,7 +95,7 @@
   :type '(repeat string)
   :group 'orsb)
 
-(defconst orsb-tools-version "2.2.1")
+(defconst orsb-tools-version "2.2.2")
 
 ;;;; Argument helpers
 

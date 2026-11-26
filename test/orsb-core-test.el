@@ -348,5 +348,27 @@ Files without an :ID: are not org-roam nodes.
         (orsb-core-restore (cdr r))
         (should (equal (orsb-test--file file) before))))))
 
+;;;; an empty section keeps to itself
+
+(ert-deftest orsb-core-empty-section-followed-by-a-heading ()
+  "An empty section's body ends where the next heading starts.
+Until 2.2.2 it was taken to be the next section: an append landed there and a
+replace deleted it."
+  (orsb-test-with-vault
+    (orsb-test--write "misc/three.org" ":PROPERTIES:\n:ID: three\n:END:\n#+title: Three\n\n* A\nkeep A\n* B\n* C\nkeep C\n** C child\ndeep\n* D")
+    (org-roam-db-sync)
+    (let ((n (orsb-core-resolve "three")))
+      (should (equal (orsb-core-section-body n "B") ""))
+      (orsb-core-update-section n "B" "- entry" "append" t)
+      (should (string-match-p "\\* B\n- entry\n\\* C\nkeep C\n\\*\\* C child\ndeep\n\\* D" (orsb-test--file "misc/three.org")))
+      (orsb-core-update-section n "B" "wiped" "replace" t)
+      (should (string-match-p "\\* A\nkeep A\n\\* B\nwiped\n\\* C\nkeep C\n\\*\\* C child\ndeep\n\\* D" (orsb-test--file "misc/three.org")))
+      (orsb-core-update-section n "B" "first" "prepend" t)
+      (should (string-match-p "\\* B\nfirst\nwiped\n\\* C\nkeep C" (orsb-test--file "misc/three.org")))
+      ;; the last heading of the file, with no newline after it
+      (orsb-core-update-section n "D" "tail" "append" t)
+      (should (string-match-p "\\* D\ntail\n\\'" (orsb-test--file "misc/three.org")))
+      (should (equal (string-trim (orsb-core-section-body n "C")) "keep C\n** C child\ndeep")))))
+
 (provide 'orsb-core-test)
 ;;; orsb-core-test.el ends here
