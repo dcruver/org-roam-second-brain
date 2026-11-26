@@ -1,7 +1,7 @@
 ;;; orsb-schema.el --- Note types and their rules, read from the vault -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.0
+;; Version: 3.1.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -28,6 +28,9 @@
 ;;   * Properties  a table: property | required | form | default
 ;;   * Sections    a table: section | required | rule
 ;;   * Keywords    a table: keyword | value   (#+KEYWORD: lines of a new note)
+;; A required property is also met by the note's own #+KEY: line, as Org
+;; reads it: #+EXPORT_FILE_NAME for EXPORT_FILE_NAME, #+HUGO_SECTION for
+;; EXPORT_HUGO_SECTION.
 ;;   * Template    the body a new note of this type starts with
 ;;
 ;; Defaults, keyword values and the template may use %DATE%, %TITLE% and
@@ -291,7 +294,8 @@ Each is an alist: type, directory, parent (type or nil), write, lifecycle."
 
 (defun orsb-schema--note-facts (file)
   "Return what the check needs from the note FILE.
-An alist: `properties' (file-level drawer, keys upcased), `headings'
+An alist: `properties' (file-level drawer, keys upcased), `keywords' (the #+KEY:
+lines above the first heading, keys upcased), `headings'
 \(top-level heading titles, lowercase, without tags) and `ids' (every :ID:)."
   (with-temp-buffer
     (insert-file-contents file)
@@ -310,7 +314,14 @@ An alist: `properties' (file-level drawer, keys upcased), `headings'
       (while (string-match "^[ \t]*:ID:[ \t]+\\(\\S-+\\)" text pos)
         (push (match-string 1 text) ids)
         (setq pos (match-end 0)))
-      `((properties . ,props) (headings . ,(nreverse headings)) (ids . ,(nreverse ids))))))
+      ;; the #+KEYWORD: lines above the first heading
+      (let ((head (substring text 0 (or (string-match "^\\*+ " text) (length text))))
+            (at 0) keywords)
+        (while (string-match "^#\\+\\([A-Za-z0-9_-]+\\):[ \t]*\\(.*\\)$" head at)
+          (push (cons (upcase (match-string 1 head)) (string-trim (match-string 2 head))) keywords)
+          (setq at (match-end 0)))
+        `((properties . ,props) (keywords . ,(nreverse keywords))
+          (headings . ,(nreverse headings)) (ids . ,(nreverse ids)))))))
 
 (defun orsb-schema--note-files (root)
   "Return every note file of the vault ROOT that the check covers."
@@ -394,7 +405,14 @@ IDS maps note ids to files in the vault ROOT.  Each is (RULE . DETAIL)."
       (push (cons "untyped-folder" "this folder has no type: no schema file here or above it sets TYPE") out))
     (dolist (row (alist-get 'properties schema))
       (let* ((key (upcase (car row)))
-             (value (cdr (assoc key props))))
+             (keywords (alist-get 'keywords facts))
+             ;; Org reads a file's own #+KEY: line as it reads the property:
+             ;; #+EXPORT_FILE_NAME for EXPORT_FILE_NAME, and an export option
+             ;; #+HUGO_SECTION for the property EXPORT_HUGO_SECTION.
+             (value (or (let ((v (cdr (assoc key props)))) (and v (not (string-empty-p v)) v))
+                        (cdr (assoc key keywords))
+                        (and (string-prefix-p "EXPORT_" key)
+                             (cdr (assoc (substring key 7) keywords))))))
         (cond ((or (null value) (string-empty-p value))
                (when (orsb-schema--yes (nth 1 row))
                  (push (cons "missing-property" key) out)))

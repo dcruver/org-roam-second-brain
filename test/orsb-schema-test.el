@@ -178,6 +178,29 @@ As of %DATE%.
     (should (equal (orsb-schema-type-directory "idea" root)
                    (file-name-as-directory (expand-file-name "projects/ideas" root))))))
 
+(ert-deftest orsb-schema-a-keyword-line-meets-a-required-property ()
+  "Org reads #+EXPORT_FILE_NAME and #+HUGO_SECTION as it reads the properties."
+  (orsb-schema-test--with-vault
+    (orsb-schema-test--write root "pages/_schema.org"
+                             (concat "* Type\n:PROPERTIES:\n:TYPE: page\n:END:\n\n* Properties\n"
+                                     "| property | required | form |\n|-\n"
+                                     "| EXPORT_FILE_NAME | yes | text |\n| EXPORT_HUGO_SECTION | yes | text |\n"))
+    (orsb-schema-test--write root "pages/by-keyword.org"
+                             ":PROPERTIES:\n:ID: k-1\n:END:\n#+title: About\n#+export_file_name: _index\n#+hugo_section: about\n\nText.\n")
+    (orsb-schema-test--write root "pages/by-property.org"
+                             ":PROPERTIES:\n:ID: k-2\n:EXPORT_FILE_NAME: _index\n:EXPORT_HUGO_SECTION: home\n:END:\n#+title: Home\n")
+    ;; a keyword below the first heading is body text, and one keyword does not stand for the other
+    (orsb-schema-test--write root "pages/half.org"
+                             ":PROPERTIES:\n:ID: k-3\n:END:\n#+title: Half\n#+hugo_section: posts\n\n* Part\n#+export_file_name: late\n")
+    (let* ((report (orsb-schema-check root))
+           (of (lambda (file)
+                 (mapcar (lambda (v) (cons (alist-get 'rule v) (alist-get 'detail v)))
+                         (seq-filter (lambda (v) (equal (alist-get 'file v) file))
+                                     (alist-get 'violations report))))))
+      (should-not (funcall of "pages/by-keyword.org"))
+      (should-not (funcall of "pages/by-property.org"))
+      (should (equal (funcall of "pages/half.org") '(("missing-property" . "EXPORT_FILE_NAME")))))))
+
 (ert-deftest orsb-schema-check-reports-what-departs ()
   (orsb-schema-test--with-vault
     ;; fine

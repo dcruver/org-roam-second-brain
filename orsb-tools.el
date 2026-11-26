@@ -1,7 +1,7 @@
 ;;; orsb-tools.el --- The 2.0 MCP tool contract -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.0
+;; Version: 3.1.1
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -73,7 +73,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.1.0")
+(defconst orsb-tools-version "3.1.1")
 
 ;;;; Argument helpers
 
