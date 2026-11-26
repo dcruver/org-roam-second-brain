@@ -54,12 +54,12 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (member "waiting" (alist-get 'status_values schema)))
       (should (equal (alist-get 'stale_days schema) orsb-stale-days))
       (should (equal (cdr (assq 'completed (alist-get 'status_aliases schema))) "done")))
-    ;; exactly these twenty: no old names, no profiles
+    ;; exactly these twenty-two: no old names, no profiles
     (orsb-tools-test--ensure-registered)
     (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
                    "set_checkbox" "get_tasks" "link_nodes" "move_node" "merge_nodes" "delete_node"
                    "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema"
-                   "check_schema")))
+                   "check_schema" "get_proposals" "decide_proposal")))
       (dolist (name names) (should (gethash name org-roam-mcp-http--tools)))
       (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
     (dolist (gone '("read_note" "read_node" "semantic_search" "create_blog_post" "blog_status" "update_node"
@@ -380,6 +380,80 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (let ((ok (orsb-tools-test--data "create_node" 'title "Whole plan" 'node_type "project"
                                      'status "active" 'next_action "Go")))
       (should-not (alist-get 'warnings ok)))))
+
+;;;; proposals
+
+(ert-deftest orsb-tools-a-proposal-waits-then-applies ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let* ((id (alist-get 'id (orsb-tools-test--data "create_node" 'title "Duct" 'node_type "project"
+                                                     'status "active" 'next_action "Print it")))
+           (file (alist-get 'file (orsb-tools-test--data "get_node" 'id id)))
+           (before (orsb-test--file file))
+           ;; refused directly, and the refusal says how to file it
+           (refusal (orsb-tools-test--error "update_body" 'id id 'section "Design" 'content "Two fans, pushing."))
+           (filed (orsb-tools-test--data "update_body" 'id id 'section "Design" 'content "Two fans, pushing."
+                                         'propose t 'reason "Decided on 2026-11-25"))
+           (pid (alist-get 'proposal_id filed)))
+      (should (string-match-p "propose:true" (alist-get 'hint refusal)))
+      (should (eq (alist-get 'proposed filed) t))
+      (should (member "Two fans, pushing." (alist-get 'lines_added (car (alist-get 'would_change filed)))))
+      ;; nothing was written
+      (should (equal (orsb-test--file file) before))
+      (let* ((list (orsb-tools-test--data "get_proposals"))
+             (one (car (alist-get 'proposals list))))
+        (should (= (alist-get 'total list) 1))
+        (should (equal (alist-get 'id one) pid))
+        (should (equal (alist-get 'reason one) "Decided on 2026-11-25"))
+        (should (equal (alist-get 'files one) (list file)))
+        (should (eq (alist-get 'stale one) :json-false)))
+      (should (equal (alist-get 'section (alist-get 'arguments (orsb-tools-test--data "get_proposals" 'id pid))) "Design"))
+      (let ((done (orsb-tools-test--data "decide_proposal" 'id pid 'decision "approve" 'note "ok")))
+        (should (equal (alist-get 'status done) "approved"))
+        (should (stringp (alist-get 'change_id done))))
+      (should (string-match-p "\\* Design\nTwo fans, pushing\\." (orsb-test--file file)))
+      (should (= (alist-get 'total (orsb-tools-test--data "get_proposals")) 0))
+      (should (equal (alist-get 'status (orsb-tools-test--data "get_proposals" 'id pid)) "approved"))
+      (should (equal (alist-get 'code (orsb-tools-test--error "decide_proposal" 'id pid 'decision "approve")) "refused")))
+    ;; a note that only changes by proposal
+    (let ((pid (alist-get 'proposal_id (orsb-tools-test--data "update_body" 'id "telos-mission"
+                                                              'content "And to teach." 'propose t))))
+      (orsb-tools-test--data "decide_proposal" 'id pid 'decision "approve")
+      (should (string-match-p "And to teach\\." (orsb-test--file "telos/mission.org"))))))
+
+(ert-deftest orsb-tools-a-proposal-goes-stale-or-is-rejected ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let* ((id (alist-get 'id (orsb-tools-test--data "create_node" 'title "Rack" 'node_type "project"
+                                                     'status "active" 'next_action "Rails")))
+           (file (alist-get 'file (orsb-tools-test--data "get_node" 'id id)))
+           (first (alist-get 'proposal_id (orsb-tools-test--data "update_body" 'id id 'section "Design"
+                                                                 'content "Four posts." 'propose t)))
+           (second (alist-get 'proposal_id (orsb-tools-test--data "update_body" 'id id 'section "Design"
+                                                                  'content "Casters." 'propose t))))
+      ;; the note moves on
+      (orsb-tools-test--data "update_body" 'id id 'section "Log" 'content "- racked")
+      (should (eq (alist-get 'stale (car (alist-get 'proposals (orsb-tools-test--data "get_proposals")))) t))
+      (should (equal (alist-get 'changed_since (orsb-tools-test--data "get_proposals" 'id first)) (list file)))
+      (should (equal (alist-get 'code (orsb-tools-test--error "decide_proposal" 'id first 'decision "approve")) "conflict"))
+      (should-not (string-match-p "Four posts" (orsb-test--file file)))
+      ;; forced, it applies to the note as it is now
+      (orsb-tools-test--data "decide_proposal" 'id first 'decision "approve" 'force t)
+      (should (string-match-p "Four posts\\." (orsb-test--file file)))
+      (should (string-match-p "- racked" (orsb-test--file file)))
+      ;; rejected: kept on record, never applied
+      (should (equal (alist-get 'status (orsb-tools-test--data "decide_proposal" 'id second 'decision "reject" 'note "no"))
+                     "rejected"))
+      (should-not (string-match-p "Casters" (orsb-test--file file)))
+      (should (= (alist-get 'total (orsb-tools-test--data "get_proposals" 'status "rejected")) 1)))
+    ;; proposing does not get round the other rules, and a read has nothing to propose
+    (let ((id (alist-get 'id (orsb-tools-test--data "create_node" 'title "Other" 'node_type "project"
+                                                    'status "active" 'next_action "x"))))
+      (should (string-match-p "append-only"
+                              (alist-get 'message (orsb-tools-test--error "update_body" 'id id 'section "Log" 'mode "replace"
+                                                                          'content "wiped" 'propose t)))))
+    (should (equal (alist-get 'code (orsb-tools-test--error "get_schema" 'propose t)) "invalid_argument"))
+    (should (equal (alist-get 'code (orsb-tools-test--error "get_proposals" 'id "nope-1")) "not_found"))))
 
 (provide 'orsb-tools-test)
 ;;; orsb-tools-test.el ends here

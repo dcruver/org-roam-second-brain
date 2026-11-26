@@ -430,6 +430,11 @@ alists with file, type, rule and detail.  Nothing is changed."
 
 ;;;; Rules on writes
 
+(defvar orsb-schema-approved nil
+  "Non-nil while a change is being proposed or an approved proposal applied.
+The \"propose\" rules then raise no objection: they say a change needs
+approval, and this is that path.  Every other rule still holds.")
+
 (defun orsb-schema-mode (&optional root)
   "Return how the vault ROOT wants its rules applied to writes.
 `strict' refuses a write that breaks a rule, `warn' lets it through and says
@@ -453,7 +458,8 @@ with a root schema file and no key it is `warn', without one it is `off'."
   "Return why SCHEMA's WRITE policy forbids any direct change, or nil."
   (pcase (orsb-schema--policy schema)
     ("readonly" (format "%s notes are read-only" (orsb-schema--type-name schema)))
-    ("propose" (format "%s notes change only through an approved proposal" (orsb-schema--type-name schema)))))
+    ("propose" (unless orsb-schema-approved
+                 (format "%s notes change only through an approved proposal" (orsb-schema--type-name schema))))))
 
 (defun orsb-schema-section-rule (schema section)
   "Return the rule SCHEMA gives the section named SECTION, or nil."
@@ -483,7 +489,8 @@ MODE is append, prepend or replace.  ROOT is the vault."
       (unless (equal mode "append")
         (push (format "section \"%s\" is append-only: use mode append" section) out)))
      ((equal rule "propose")
-      (push (format "section \"%s\" changes only through an approved proposal" section) out))
+      (unless orsb-schema-approved
+        (push (format "section \"%s\" changes only through an approved proposal" section) out)))
      ((and (not section) ruled)
       (push (format "%s notes are edited one section at a time: name a section (%s)"
                     type (mapconcat #'car ruled ", "))

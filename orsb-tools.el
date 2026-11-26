@@ -166,7 +166,7 @@ Strict refuses the write; warn records them for the result; off ignores."
   (when problems
     (pcase (orsb-schema-mode)
       ('strict (orsb-error-hint 'schema-violation
-                                "get_schema with type shows this note type's rules; check_schema lists what already departs from them."
+                                "get_schema with type shows this note type's rules. A change that needs approval can be filed by repeating the call with propose:true."
                                 "%s" (string-join problems "; ")))
       ('warn (setq orsb-tools--warnings (append orsb-tools--warnings problems))))))
 
@@ -1256,16 +1256,167 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
   "ARGS as an alist, treating a non-object (e.g. []) as no arguments."
   (if (and (listp args) (or (null args) (consp (car args)))) args nil))
 
+;;;; Proposals: a write, stored until someone approves it
+
+(defvar orsb-tools--definitions)
+
+(defvar orsb-tools--current-tool nil
+  "Name of the tool being run, for filing a proposal.")
+
+(defun orsb-tools--proposal-dir ()
+  "The folder proposals are kept in, created on demand."
+  (let ((dir (expand-file-name "proposals/" (orsb-core--change-dir))))
+    (make-directory dir t)
+    dir))
+
+(defun orsb-tools--proposal-file (id)
+  "The file of proposal ID."
+  (unless (and (stringp id) (string-match-p "\\`[0-9A-Za-z-]+\\'" id))
+    (orsb-error 'invalid-argument "Not a proposal id: %s" id))
+  (expand-file-name (concat id ".json") (orsb-tools--proposal-dir)))
+
+(defun orsb-tools--proposal-read (id)
+  "Return proposal ID as an alist, or signal not-found."
+  (let ((file (orsb-tools--proposal-file id)))
+    (unless (file-readable-p file)
+      (orsb-error-hint 'not-found "get_proposals lists them." "No such proposal: %s" id))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (let ((json-object-type 'alist) (json-array-type 'vector) (json-key-type 'symbol) (json-false :json-false))
+        (json-read-from-string (buffer-string))))))
+
+(defun orsb-tools--proposal-write (proposal)
+  "Store PROPOSAL, an alist with an id."
+  (let ((coding-system-for-write 'utf-8))
+    (with-temp-file (orsb-tools--proposal-file (alist-get 'id proposal))
+      (insert (json-encode proposal)))))
+
+(defun orsb-tools--proposal-stale (proposal)
+  "Return the files of PROPOSAL that changed since it was made, as a list."
+  (let (out)
+    (seq-doseq (f (alist-get 'files proposal))
+      (let* ((rel (alist-get 'file f))
+             (was (alist-get 'hash f))
+             (was (if (memq was '(nil :json-null :json-false)) nil was))
+             (now (orsb-core--hash (orsb-core--disk-content (orsb-core--vault-file rel)))))
+        (unless (equal was now) (push rel out))))
+    (nreverse out)))
+
+(defun orsb-tools--proposal-summary (proposal)
+  "The short form of PROPOSAL for a list."
+  (let ((stale (orsb-tools--proposal-stale proposal))
+        (pending (equal (alist-get 'status proposal) "pending")))
+    `((id . ,(alist-get 'id proposal))
+      (status . ,(alist-get 'status proposal))
+      (tool . ,(alist-get 'tool proposal))
+      (reason . ,(or (alist-get 'reason proposal) :json-null))
+      (created . ,(alist-get 'created proposal))
+      (files . ,(orsb--vector (mapcar (lambda (f) (alist-get 'file f)) (append (alist-get 'files proposal) nil))))
+      ,@(when pending `((stale . ,(if stale t :json-false)))))))
+
+(defun orsb-tools--propose (tool fn args)
+  "File the call of TOOL (function FN) with ARGS as a proposal; write nothing.
+The call is run as a dry run with the \"needs approval\" rules lifted, so
+its preview is exactly what approving it would do."
+  (unless (seq-find (lambda (def) (and (equal (car def) tool) (assq 'dry_run (nth 4 def)))) orsb-tools--definitions)
+    (orsb-error 'invalid-argument "%s changes nothing, so there is nothing to propose" tool))
+  (let* ((call (seq-remove (lambda (c) (memq (car c) '(propose reason dry_run))) args))
+         (orsb-schema-approved t)
+         (data (funcall fn (append call '((dry_run . t)))))
+         (preview (append (alist-get 'would_change data) nil))
+         (id (format "%s-%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
+         (proposal
+          `((id . ,id)
+            (status . "pending")
+            (tool . ,tool)
+            (arguments . ,(orsb--object call))
+            (reason . ,(or (orsb-arg args 'reason) :json-null))
+            (created . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
+            (files . ,(orsb--vector
+                       (mapcar (lambda (entry)
+                                 (let ((rel (alist-get 'file entry)))
+                                   `((file . ,rel)
+                                     (hash . ,(or (orsb-core--hash (orsb-core--disk-content (orsb-core--vault-file rel)))
+                                                  :json-null)))))
+                               preview)))
+            (would_change . ,(orsb--vector preview)))))
+    (unless preview
+      (orsb-error 'invalid-argument "This call would change nothing, so there is nothing to propose"))
+    (orsb-tools--proposal-write proposal)
+    `((proposed . t) (proposal_id . ,id) (status . "pending")
+      (would_change . ,(orsb--vector preview))
+      (hint . "Nothing was written. decide_proposal with this id and decision \"approve\" applies it; \"reject\" drops it."))))
+
+(defun orsb-tool-get-proposals (args)
+  "get_proposals: the changes waiting for approval, or one of them in full."
+  (if-let* ((id (orsb-arg args 'id)))
+      (let ((p (orsb-tools--proposal-read id)))
+        (append (orsb-tools--proposal-summary p)
+                `((arguments . ,(orsb--object (alist-get 'arguments p)))
+                  (would_change . ,(alist-get 'would_change p))
+                  ,@(when-let* ((stale (and (equal (alist-get 'status p) "pending") (orsb-tools--proposal-stale p))))
+                      `((changed_since . ,(orsb--vector stale))))
+                  ,@(when-let* ((c (alist-get 'change_id p))) `((change_id . ,c)))
+                  ,@(when-let* ((n (alist-get 'note p))) `((note . ,n)))
+                  ,@(when-let* ((d (alist-get 'decided p))) `((decided . ,d))))))
+    (let* ((want (or (orsb-arg args 'status) "pending"))
+           (limit (max 1 (min 200 (orsb-arg-int args 'limit 50))))
+           (all (mapcar (lambda (f) (orsb-tools--proposal-read (file-name-base f)))
+                        (directory-files (orsb-tools--proposal-dir) nil "\\.json\\'")))
+           (kept (seq-filter (lambda (p) (or (equal want "all") (equal (alist-get 'status p) want))) all))
+           ;; ids start with their timestamp: oldest first, the order to decide them in
+           (kept (sort kept (lambda (a b) (string< (alist-get 'id a) (alist-get 'id b))))))
+      `((status . ,want)
+        (total . ,(length kept))
+        (proposals . ,(orsb--vector (mapcar #'orsb-tools--proposal-summary (seq-take kept limit))))))))
+
+(defun orsb-tool-decide-proposal (args)
+  "decide_proposal: approve (apply) or reject a stored change."
+  (orsb-require args 'id 'decision)
+  (let* ((p (orsb-tools--proposal-read (orsb-arg args 'id)))
+         (decision (orsb-arg args 'decision))
+         (def (seq-find (lambda (d) (equal (car d) (alist-get 'tool p))) orsb-tools--definitions))
+         (stamp `((decided . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
+                  ,@(when-let* ((n (orsb-arg args 'note))) `((note . ,n))))))
+    (unless (member decision '("approve" "reject"))
+      (orsb-error 'invalid-argument "decision must be approve or reject"))
+    (unless (equal (alist-get 'status p) "pending")
+      (orsb-error 'refused "Proposal %s was already %s" (alist-get 'id p) (alist-get 'status p)))
+    (if (equal decision "reject")
+        (progn
+          (orsb-tools--proposal-write (append `((status . "rejected")) stamp (assq-delete-all 'status (copy-alist p))))
+          `((id . ,(alist-get 'id p)) (status . "rejected")))
+      (when-let* ((stale (and (not (orsb-arg-bool args 'force)) (orsb-tools--proposal-stale p))))
+        (orsb-error-hint 'conflict
+                         "get_proposals with this id shows what it would do; force:true applies it to the note as it is now, or reject it and propose again."
+                         "The note changed since this was proposed: %s" (string-join stale ", ")))
+      (unless def (orsb-error 'internal "Proposal %s names an unknown tool: %s" (alist-get 'id p) (alist-get 'tool p)))
+      (let* ((orsb-schema-approved t)
+             (call (seq-remove (lambda (c) (memq (car c) '(propose reason dry_run)))
+                               (append (alist-get 'arguments p) nil)))
+             (data (funcall (nth 1 def) call)))
+        (orsb-tools--proposal-write
+         (append `((status . "approved") (change_id . ,(or (alist-get 'change_id data) :json-null)))
+                 stamp (assq-delete-all 'status (copy-alist p))))
+        `((id . ,(alist-get 'id p)) (status . "approved")
+          (change_id . ,(or (alist-get 'change_id data) :json-null))
+          (result . ,(orsb--object data)))))))
+
 (defun orsb-tools--run (fn args)
-  "Run FN on ARGS; return (:ok DATA) or (:error CODE MESSAGE HINT)."
+  "Run FN on ARGS; return (:ok DATA) or (:error CODE MESSAGE HINT).
+With propose in ARGS the call is filed as a proposal instead of run."
   (condition-case err
-      (list :ok (funcall fn (orsb-tools--clean-args args)))
+      (let ((clean (orsb-tools--clean-args args)))
+        (list :ok (if (orsb-arg-bool clean 'propose)
+                      (orsb-tools--propose orsb-tools--current-tool fn clean)
+                    (funcall fn clean))))
     (orsb-error (list :error (nth 1 err) (nth 2 err) (nth 3 err)))
     (error (list :error 'internal (error-message-string err) nil))))
 
-(defun orsb-tools--envelope (fn args)
-  "Run FN on ARGS and return the JSON envelope."
+(defun orsb-tools--envelope (fn args &optional tool)
+  "Run FN on ARGS and return the JSON envelope.  TOOL is the tool's name."
   (let* ((orsb-tools--warnings nil)
+         (orsb-tools--current-tool tool)
          (r (orsb-tools--run fn args)))
     (if (eq (car r) :ok)
         (json-encode `((ok . t)
@@ -1468,6 +1619,19 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
      "The vocabulary this server enforces: note types (read from the vault's _schema.org files), status values, TODO keywords, tags in use, id forms. With type: that type's required properties, sections, write policy and template. Call this instead of guessing."
      ()
      ((type . ((type . "string") (description . "A note type; returns its merged rules")))))
+    ("get_proposals" orsb-tool-get-proposals
+     "Changes filed for approval (any write tool called with propose:true). Lists the pending ones, oldest first, each with the files it touches and whether the note changed since. With id: one proposal in full, with its line-by-line preview."
+     ()
+     ((id . ((type . "string") (description . "One proposal, in full")))
+      (status . ((type . "string") (enum . ("pending" "approved" "rejected" "all")) (default . "pending")))
+      (limit . ((type . "integer") (default . 50)))))
+    ("decide_proposal" orsb-tool-decide-proposal
+     "Approve or reject a proposal. Approve applies the stored change and returns its change_id (restore undoes it). If the note changed since the proposal was made it is refused unless force:true."
+     ("id" "decision")
+     ((id . ((type . "string")))
+      (decision . ((type . "string") (enum . ("approve" "reject"))))
+      (note . ((type . "string") (description . "Kept with the decision")))
+      (force . ((type . "boolean") (default . :json-false) (description . "Apply even though the note changed since")))))
     ("check_schema" orsb-tool-check-schema
      "Where the notes depart from the vault's own rules: a note in a folder that may not hold notes, a missing required property or section, a value outside its allowed set, a link to the wrong kind of note. Returns counts by rule and by type, and the violations (paged). Reads only; changes nothing."
      ()
@@ -1480,12 +1644,19 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
 
 (defun orsb-tools--register-def (name fn desc required schema)
   "Register tool NAME running FN with DESC, REQUIRED args and SCHEMA."
-  (org-roam-mcp-http--register-tool
-   name desc
-   (lambda (args) (orsb-tools--envelope fn args))
-   (mapcar (lambda (p) (cons (car p) 'string)) schema)
-   required
-   schema))
+  (let ((schema (if (assq 'dry_run schema)
+                    ;; every tool that writes can also be filed for approval
+                    (append schema
+                            '((propose . ((type . "boolean") (default . :json-false)
+                                          (description . "File this change for approval instead of making it; returns proposal_id")))
+                              (reason . ((type . "string") (description . "With propose: why, shown to whoever decides")))))
+                  schema)))
+    (org-roam-mcp-http--register-tool
+     name desc
+     (lambda (args) (orsb-tools--envelope fn args name))
+     (mapcar (lambda (p) (cons (car p) 'string)) schema)
+     required
+     schema)))
 
 (defun orsb-tools-register ()
   "Register the tools (`orsb-tools--definitions')."
