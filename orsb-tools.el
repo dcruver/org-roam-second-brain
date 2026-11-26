@@ -73,7 +73,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.0.0-rc2")
+(defconst orsb-tools-version "3.0.0-rc3")
 
 ;;;; Argument helpers
 

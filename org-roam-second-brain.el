@@ -437,6 +437,60 @@ A refusal becomes a `user-error'; rules broken in warn mode are shown."
             (message "Note rules: %s" (string-join orsb-tools--warnings "; "))))
       (orsb-error (user-error "%s" (nth 2 err))))))
 
+;; Proposals live with the notes server that took them, not in the vault.  An
+;; Emacs that is not that server (a desktop beside a headless server) asks it.
+
+(defcustom orsb-server-url nil
+  "URL of the notes server that holds the proposals, or nil.
+For example \"http://feynman:8007/mcp\".  nil means this Emacs is the server:
+proposals are read from its own change directory.  When set, the approval
+screen lists, shows and decides proposals on that server, which also makes
+the approved change."
+  :type '(choice (const nil) string)
+  :group 'orsb)
+
+(defun sb/--remote-post (body)
+  "POST the JSON string BODY to `orsb-server-url'; return the reply body."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers '(("Content-Type" . "application/json")
+                                     ("Accept" . "application/json, text/event-stream")))
+        (url-request-data (encode-coding-string body 'utf-8)))
+    (with-current-buffer (or (url-retrieve-synchronously orsb-server-url t t 30)
+                             (user-error "No answer from the notes server at %s" orsb-server-url))
+      (unwind-protect
+          (progn (goto-char (point-min))
+                 (unless (re-search-forward "\r?\n\r?\n" nil t)
+                   (user-error "Bad answer from the notes server at %s" orsb-server-url))
+                 (decode-coding-string (buffer-substring-no-properties (point) (point-max)) 'utf-8))
+        (kill-buffer)))))
+
+(defun sb/--remote-call (tool args)
+  "Call TOOL with ARGS on the notes server; return its data.
+A refusal is signalled as `orsb-error', as the local call would."
+  (let* ((parse (lambda (text) (json-parse-string text :object-type 'alist :array-type 'array
+                                                  :null-object nil :false-object nil)))
+         (request (json-serialize `((jsonrpc . "2.0") (id . 1) (method . "tools/call")
+                                    (params . ((name . ,tool)
+                                               (arguments . ,(or args (make-hash-table))))))))
+         (reply (funcall parse (sb/--remote-post request)))
+         (text (alist-get 'text (aref (or (alist-get 'content (alist-get 'result reply))
+                                          (user-error "The notes server answered without a result"))
+                                      0)))
+         (envelope (funcall parse text)))
+    (if (alist-get 'ok envelope)
+        (alist-get 'data envelope)
+      (let ((e (alist-get 'error envelope)))
+        (signal 'orsb-error (list (intern (or (alist-get 'code e) "error")) (alist-get 'message e)))))))
+
+(defun sb/--proposals-call (tool fn args)
+  "Call the proposal TOOL with ARGS: on the server when one is set, else FN here."
+  (if orsb-server-url (sb/--remote-call tool args) (funcall fn args)))
+
+(defun sb/--proposals (tool fn args)
+  "Like `sb/--proposals-call', with a refusal shown as a `user-error'."
+  (condition-case err (sb/--proposals-call tool fn args)
+    (orsb-error (user-error "%s" (nth 2 err)))))
+
 (defun sb/--items (data key)
   "The items of the section KEY of the review DATA, as a list."
   (append (alist-get 'items (alist-get key data)) nil))
@@ -541,7 +595,8 @@ and changes waiting for approval."
          (stale (sb/--items data 'stale))
          (tasks (sb/--items data 'due_tasks))
          (inbox (sb/--items data 'inbox))
-         (pending (alist-get 'total (sb/--call #'orsb-tool-get-proposals nil))))
+         ;; an unreachable server must not break the digest
+         (pending (or (ignore-errors (alist-get 'total (sb/--proposals "get_proposals" #'orsb-tool-get-proposals nil))) 0)))
     (sb/--show
      sb/digest-buffer-name 'digest
      (format "Second Brain digest, %s" (format-time-string "%Y-%m-%d %H:%M"))
@@ -629,7 +684,7 @@ and changes waiting for approval."
   "List the changes agents have filed for approval.
 RET shows what one would change, a approves it, r rejects it."
   (interactive)
-  (let ((items (append (alist-get 'proposals (sb/--call #'orsb-tool-get-proposals '((limit . 200)))) nil)))
+  (let ((items (append (alist-get 'proposals (sb/--proposals "get_proposals" #'orsb-tool-get-proposals '((limit . 200)))) nil)))
     (sb/--show "*Second Brain: proposals*" 'proposals (format "Waiting for approval (%d)" (length items))
                (lambda ()
                  (unless items (insert "  Nothing is waiting.\n"))
@@ -647,7 +702,7 @@ RET shows what one would change, a approves it, r rejects it."
 
 (defun sb/proposal-show (id)
   "Show what proposal ID would change, line by line."
-  (let ((p (sb/--call #'orsb-tool-get-proposals `((id . ,id)))))
+  (let ((p (sb/--proposals "get_proposals" #'orsb-tool-get-proposals `((id . ,id)))))
     (with-current-buffer (get-buffer-create "*Second Brain: proposal*")
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -669,11 +724,11 @@ RET shows what one would change, a approves it, r rejects it."
   (let ((id (or (sb/--proposal-at-point) (user-error "No proposal on this line"))))
     (when (y-or-n-p (format "Apply proposal %s? " id))
       (condition-case err
-          (orsb-tool-decide-proposal `((id . ,id) (decision . "approve")))
+          (sb/--proposals-call "decide_proposal" #'orsb-tool-decide-proposal `((id . ,id) (decision . "approve")))
         (orsb-error
          (if (and (eq (nth 1 err) 'conflict)
                   (y-or-n-p (format "%s.  Apply it to the note as it is now? " (nth 2 err))))
-             (sb/--call #'orsb-tool-decide-proposal `((id . ,id) (decision . "approve") (force . t)))
+             (sb/--proposals "decide_proposal" #'orsb-tool-decide-proposal `((id . ,id) (decision . "approve") (force . t)))
            (user-error "%s" (nth 2 err)))))
       (message "Applied %s" id)
       (sb/proposals))))
@@ -682,7 +737,7 @@ RET shows what one would change, a approves it, r rejects it."
   "Reject the proposal at point, keeping NOTE as the reason."
   (interactive (list (if (sb/--proposal-at-point) (read-string "Why (optional): ") "")))
   (let ((id (or (sb/--proposal-at-point) (user-error "No proposal on this line"))))
-    (sb/--call #'orsb-tool-decide-proposal
+    (sb/--proposals "decide_proposal" #'orsb-tool-decide-proposal
                `((id . ,id) (decision . "reject") ,@(unless (string-empty-p note) `((note . ,note)))))
     (message "Rejected %s" id)
     (sb/proposals)))

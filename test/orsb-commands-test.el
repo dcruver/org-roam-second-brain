@@ -83,5 +83,31 @@
                                                                                          org-roam-directory))))
       (should (string-match-p "Nothing is waiting" (orsb-commands-test--text "*Second Brain: proposals*"))))))
 
+
+(ert-deftest orsb-commands-proposals-on-a-server ()
+  "With `orsb-server-url' set, proposals are read from and decided on that server."
+  (let ((orsb-server-url "http://notes.example:8007/mcp") sent)
+    (cl-letf (((symbol-function 'sb/--remote-post)
+               (lambda (body)
+                 (push (json-parse-string body :object-type 'alist) sent)
+                 (let* ((params (alist-get 'params (car sent)))
+                        (envelope (if (equal (alist-get 'name params) "get_proposals")
+                                      "{\"ok\":true,\"data\":{\"total\":1,\"proposals\":[{\"id\":\"p1\",\"stale\":false}]}}"
+                                    "{\"ok\":false,\"error\":{\"code\":\"conflict\",\"message\":\"the note changed\"}}")))
+                   (json-serialize `((jsonrpc . "2.0") (id . 1)
+                                     (result . ((content . [((type . "text") (text . ,envelope))])))))))))
+      (let ((data (sb/--proposals "get_proposals" #'ignore nil)))
+        (should (= 1 (alist-get 'total data)))
+        (should (equal "p1" (alist-get 'id (aref (alist-get 'proposals data) 0))))
+        ;; false comes back as nil, as the local call gives it
+        (should-not (alist-get 'stale (aref (alist-get 'proposals data) 0))))
+      (should (equal "get_proposals" (alist-get 'name (alist-get 'params (car sent)))))
+      ;; a refusal keeps its code, so approve can offer to force a stale proposal
+      (let ((err (should-error (sb/--proposals-call "decide_proposal" #'ignore '((id . "p1") (decision . "approve")))
+                               :type 'orsb-error)))
+        (should (eq 'conflict (nth 1 err)))
+        (should (equal "the note changed" (nth 2 err))))
+      (should (equal "approve" (alist-get 'decision (alist-get 'arguments (alist-get 'params (car sent)))))))))
+
 (provide 'orsb-commands-test)
 ;;; orsb-commands-test.el ends here

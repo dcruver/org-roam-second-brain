@@ -141,6 +141,11 @@ changed since it was filed is refused unless forced. Proposing lifts only the
 apart: restricting who may call `decide_proposal` is the job of whatever sits
 in front of it.
 
+Proposals are kept by the notes server that took them, outside the vault. In an
+Emacs that is not that server (a desktop beside a headless server), set
+`orsb-server-url` to the server's address (`http://host:8007/mcp`): `sb/proposals`
+then lists, shows and decides them there, and the server makes the approved change.
+
 ## The MCP server
 
 ```elisp
