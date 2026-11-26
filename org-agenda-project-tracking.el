@@ -26,8 +26,8 @@
   :group 'orsb
   :prefix "orsb-agenda-")
 
-(defcustom orsb-agenda-directories '("project" "admin")
-  "Node types (keys of `orsb-directories') whose directories feed org-agenda."
+(defcustom orsb-agenda-directories nil
+  "Vault folders (relative to `org-roam-directory') whose notes feed org-agenda."
   :type '(repeat string)
   :group 'orsb-agenda)
 
@@ -74,12 +74,11 @@
 
 ;;;###autoload
 (defun orsb-agenda-setup ()
-  "Point org-agenda at the project and admin notes, install the views,
+  "Point org-agenda at `orsb-agenda-directories', install the views,
 and journal TODO changes to the daily note."
   (interactive)
   (setq org-agenda-files
-        (mapcar (lambda (type) (expand-file-name (cdr (assoc type orsb-directories)) org-roam-directory))
-                orsb-agenda-directories))
+        (mapcar (lambda (dir) (expand-file-name dir org-roam-directory)) orsb-agenda-directories))
   (dolist (cmd orsb-agenda-custom-commands)
     (setf (alist-get (car cmd) org-agenda-custom-commands nil nil #'equal) (cdr cmd)))
   (add-hook 'org-after-todo-state-change-hook #'orsb-agenda-log-state-change))

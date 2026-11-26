@@ -1,7 +1,7 @@
 ;;; orsb-tools.el --- The 2.0 MCP tool contract -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 2.1.0
+;; Version: 3.0.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -16,7 +16,7 @@
 ;;   {"ok":false,"error":{"code":"not_found|invalid_argument|refused|unavailable|internal",
 ;;                        "message":"...","hint":"..."}}   (+ MCP isError)
 ;;
-;; and one status vocabulary (`orsb-status-values').  Every write is
+;; and note types read from the vault (`orsb-schema').  Every write is
 ;; recorded as a change with an id that `restore' undoes, and most writes
 ;; take dry_run to preview.  Everything is implemented on `orsb-core'.
 ;;
@@ -52,28 +52,6 @@
 
 ;;;; Customization
 
-(defvaralias 'orsb-node-types 'orsb-directories)
-
-(defcustom orsb-status-values '("active" "waiting" "blocked" "someday" "done" "cancelled")
-  "Allowed values of the STATUS property.  `stale' is computed, never stored."
-  :type '(repeat string)
-  :group 'orsb)
-
-(defcustom orsb-blog-status-values '("idea" "stub" "draft" "published")
-  "Allowed STATUS values for blog nodes, whose lifecycle differs from projects'."
-  :type '(repeat string)
-  :group 'orsb)
-
-(defcustom orsb-status-aliases
-  '(("completed" . "done") ("finished" . "done") ("closed" . "done")
-    ("shelved" . "someday") ("paused" . "waiting") ("on-hold" . "waiting")
-    ("superseded" . "cancelled") ("dropped" . "cancelled")
-    ("idea" . "someday") ("todo" . "active") ("in-progress" . "active")
-    ("draft" . "active") ("published" . "done") ("stub" . "someday"))
-  "Legacy STATUS spellings and the canonical value each maps to."
-  :type '(alist :key-type string :value-type string)
-  :group 'orsb)
-
 (defcustom orsb-stale-days 5
   "Days without a change after which an unfinished node counts as stale."
   :type 'integer
@@ -90,13 +68,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defcustom orsb-known-property-keys
-  '("NODE-TYPE" "STATUS" "NEXT-ACTION" "CONTEXT" "LAST-CONTACT" "DUE-DATE" "ONE-LINER" "PRIORITY" "CREATED")
-  "Property keys with a conventional meaning, reported by get_schema."
-  :type '(repeat string)
-  :group 'orsb)
-
-(defconst orsb-tools-version "3.0.0-alpha.1")
+(defconst orsb-tools-version "3.0.0-alpha.4")
 
 ;;;; Argument helpers
 
@@ -183,11 +155,28 @@ top-level heading."
         (or (car (org-roam-node-olp node)) (org-roam-node-title node)))))
 
 (defun orsb-tools--node-type (node props)
-  "Return the type of NODE: where it lives when the vault has schema files,
-else its NODE-TYPE in PROPS."
+  "Return the type of NODE: the type of the folder it lives in.
+PROPS is unused; a note's properties do not say what it is."
+  (ignore props)
   (if (orsb-tools--schema-on-p)
-      (orsb-schema-get (orsb-schema-for-file (org-roam-node-file node)) "TYPE")
-    (cdr (assoc "NODE-TYPE" props))))
+      (or (orsb-schema-get (orsb-schema-for-file (org-roam-node-file node)) "TYPE") "note")
+    "note"))
+
+(defun orsb-tools--type-directory (type)
+  "Return the folder notes of TYPE are created in, or signal.
+The vault's schema files define the types.  A vault without any has one
+type, \"note\", kept in its top folder."
+  (cond ((not (orsb-schema-present-p))
+         (if (equal type "note")
+             (file-name-as-directory (expand-file-name org-roam-directory))
+           (orsb-error-hint 'invalid-argument
+                            "Note types come from _schema.org files in the vault; this vault has none."
+                            "No such note type: %s (this vault has only \"note\")" type)))
+        ((orsb-schema-type-directory type))
+        (t (orsb-error-hint 'invalid-argument
+                            "get_schema lists the note types this vault defines."
+                            "No such note type: %s (this vault has %s)" type
+                            (mapconcat (lambda (e) (alist-get 'type e)) (orsb-schema-tree) ", ")))))
 
 (defun orsb-tools--lifecycle-key (file)
   "Return the property that holds the status of the note FILE."
@@ -207,15 +196,23 @@ else its NODE-TYPE in PROPS."
   "Whole days since MTIME."
   (if mtime (/ (- (float-time) (float-time mtime)) 86400.0) 0))
 
-(defun orsb-tools--stale-p (status days)
-  "Whether a node with STATUS untouched for DAYS counts as stale."
-  (and (member (or status "active") '("active" "waiting" "blocked"))
-       (>= days orsb-stale-days)))
+(defun orsb-tools--open-p (node status)
+  "Whether NODE, with lifecycle value STATUS, is unfinished work.
+True when its type declares a lifecycle and STATUS is not one of the values
+that type calls finished.  A type without a lifecycle is never open."
+  (when (orsb-tools--schema-on-p)
+    (let ((schema (orsb-schema-for-file (org-roam-node-file node))))
+      (and (orsb-schema-get schema "LIFECYCLE")
+           (not (orsb-schema-finished-p schema status))))))
+
+(defun orsb-tools--stale-p (node status days)
+  "Whether NODE, with lifecycle value STATUS, untouched for DAYS, is stale."
+  (and (>= days orsb-stale-days) (orsb-tools--open-p node status)))
 
 (defun orsb-tools--light-record (node)
   "Cheap record built from the db only (no file read)."
   (let* ((props (org-roam-node-properties node))
-         (status (cdr (assoc "STATUS" props)))
+         (status (cdr (assoc (orsb-tools--lifecycle-key (org-roam-node-file node)) props)))
          (days (orsb-tools--days-since (org-roam-node-file-mtime node))))
     `((id . ,(org-roam-node-id node))
       (title . ,(org-roam-node-title node))
@@ -228,7 +225,7 @@ else its NODE-TYPE in PROPS."
       (modified . ,(let ((m (org-roam-node-file-mtime node)))
                      (when m (format-time-string "%Y-%m-%dT%H:%M:%S%z" m))))
       (days_since_modified . ,(round days))
-      (stale . ,(if (orsb-tools--stale-p status days) t :json-false))
+      (stale . ,(if (orsb-tools--stale-p node status days) t :json-false))
       ,@(when-let ((next (cdr (assoc "NEXT-ACTION" props)))) `((next_action . ,next))))))
 
 (defun orsb-tools--links (node)
@@ -288,29 +285,6 @@ else its NODE-TYPE in PROPS."
          (flat (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " clean)))
          (n (or length 240)))
     (if (> (length flat) n) (concat (substring flat 0 n) "…") flat)))
-
-;;;; Status vocabulary
-
-(defun orsb-tools--status-values-for (node-or-type)
-  "The status vocabulary that applies to NODE-OR-TYPE (a node or a type string)."
-  (if (if (stringp node-or-type) (equal node-or-type "blog") (and node-or-type (orsb-core-blog-node-p node-or-type)))
-      orsb-blog-status-values
-    orsb-status-values))
-
-(defun orsb-tools--canonical-status (value)
-  "Return the canonical status for VALUE, or nil when it is not recognized."
-  (let ((v (downcase (string-trim (or value "")))))
-    (cond ((member v orsb-status-values) v)
-          ((assoc v orsb-status-aliases) (cdr (assoc v orsb-status-aliases)))
-          (t nil))))
-
-(defun orsb-tools--check-status (value &optional node-or-type)
-  "Return VALUE if it is an allowed status for NODE-OR-TYPE, else signal."
-  (let* ((v (downcase (string-trim value)))
-         (allowed (orsb-tools--status-values-for node-or-type)))
-    (if (member v allowed) v
-      (orsb-error 'invalid-argument "status must be one of %s (got %S)"
-                  (string-join allowed ", ") value))))
 
 ;;;; Shared helpers
 
@@ -546,8 +520,8 @@ the database only; no bodies."
     (let ((records (mapcar (lambda (n) (cons n (orsb-tools--light-record n))) nodes)))
       (when type (setq records (seq-filter (lambda (r) (equal (alist-get 'node_type (cdr r)) type)) records)))
       (when status
-        (let ((s (or (orsb-tools--canonical-status status) status)))
-          (setq records (seq-filter (lambda (r) (equal (orsb-tools--canonical-status (alist-get 'status (cdr r))) s)) records))))
+        (let ((s (downcase status)))
+          (setq records (seq-filter (lambda (r) (equal (downcase (or (alist-get 'status (cdr r)) "")) s)) records))))
       (when (and stale (not (eq stale :json-null)))
         (let ((want (not (eq stale :json-false))))
           (setq records (seq-filter (lambda (r) (eq (eq (alist-get 'stale (cdr r)) t) want)) records))))
@@ -651,18 +625,16 @@ checks titles and aliases only."
 
 (defun orsb-tools--create-by-schema (args type title)
   "Create a TYPE note titled TITLE the way the vault's schema files say.
-The folder, the required properties and the starting body all come from the
-type's merged schema.  Any other argument in ARGS that names one of the
-type's properties (next_action for NEXT-ACTION) sets that property."
-  (let* ((dir (or (orsb-schema-type-directory type)
-                  (orsb-error-hint 'invalid-argument
-                                   "get_schema lists the note types this vault defines."
-                                   "No such note type: %s (this vault has %s)" type
-                                   (mapconcat (lambda (e) (alist-get 'type e)) (orsb-schema-tree) ", "))))
-         (schema (orsb-schema-for-directory dir))
+The folder, the default and required properties, the keyword lines and the
+starting body all come from the type's merged schema.  Any other argument
+in ARGS that names one of the type's properties (next_action for
+NEXT-ACTION) sets that property."
+  (let* ((dir (orsb-tools--type-directory type))
+         (schema (if (orsb-schema-present-p) (orsb-schema-for-directory dir) nil))
          (known (mapcar (lambda (r) (upcase (car r))) (alist-get 'properties schema)))
-         (lifecycle (orsb-schema-get schema "LIFECYCLE"))
-         (props (orsb-schema-server-properties schema)))
+         (lifecycle (or (orsb-schema-get schema "LIFECYCLE") "STATUS"))
+         (props (append (orsb-schema-default-properties schema title)
+                        (orsb-schema-server-properties schema))))
     (dolist (cell args)
       (let ((key (upcase (replace-regexp-in-string "_" "-" (symbol-name (car cell))))))
         (when (and (not (memq (car cell) orsb-tools--create-reserved))
@@ -670,27 +642,24 @@ type's properties (next_action for NEXT-ACTION) sets that property."
                    (orsb-arg args (car cell)))
           (setf (alist-get key props nil nil #'equal) (format "%s" (orsb-arg args (car cell)))))))
     (when-let* ((st (orsb-arg args 'status)))
-      (setf (alist-get (or lifecycle "STATUS") props nil nil #'equal) st))
+      (setf (alist-get lifecycle props nil nil #'equal) st))
     (dolist (cell (orsb-arg-props args 'properties))
       (setf (alist-get (upcase (car cell)) props nil nil #'equal) (format "%s" (cdr cell))))
-    (orsb-tools--guard (orsb-schema-create-problems type props #'orsb-tools--id-file))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard (orsb-schema-create-problems type props #'orsb-tools--id-file)))
     (orsb-tools--change
      args "create_node" (format "create %s" title)
      (lambda ()
-       (let* ((id (org-id-new))
-              (tags (orsb-arg-list args 'tags))
-              (stamp (format-time-string "%Y%m%d%H%M%S"))
-              (path (expand-file-name (format "%s-%s.org" (orsb-core--slug title) stamp) dir)))
-         (make-directory dir t)
-         (while (file-exists-p path)
-           (setq path (expand-file-name (format "%s-%s-%d.org" (orsb-core--slug title) stamp (random 1000)) dir)))
-         (orsb-core--write-new-file
-          path
-          (cons (cons "ID" id) (seq-remove (lambda (c) (equal (car c) "ID")) (reverse props)))
-          `(("title" . ,title)
-            ("filetags" . ,(and tags (concat ":" (string-join tags ":") ":"))))
-          (orsb-schema-new-body schema title (orsb-arg args 'body)))
-         (append '((created . t)) (orsb-tools--full-record (orsb-core-resolve id) nil)))))))
+       (let ((node (orsb-core-create-node
+                    title
+                    :dir dir
+                    ;; schema order first, then whatever else was given
+                    :drawer (append (seq-filter #'identity (mapcar (lambda (k) (assoc k props)) known))
+                                    (seq-remove (lambda (c) (member (car c) known)) (reverse props)))
+                    :keywords (orsb-schema-new-keywords schema title)
+                    :tags (orsb-arg-list args 'tags)
+                    :body (orsb-schema-new-body schema title (orsb-arg args 'body)))))
+         (append '((created . t)) (orsb-tools--full-record node nil)))))))
 
 (defun orsb-tool-create-node (args)
   "create_node: a typed note, or with parent_id a heading inside a note."
@@ -715,41 +684,29 @@ type's properties (next_action for NEXT-ACTION) sets that property."
      ((and dups (equal on-dup "use_existing") (alist-get 'id (car dups)))
       (append '((created . :json-false))
               (orsb-tools--full-record (orsb-core-resolve (alist-get 'id (car dups))) nil)))
-     ((and (not parent) (orsb-tools--schema-on-p))
+     ((not parent)
       (orsb-tools--create-by-schema args type title))
      (t
-      (when (and parent (orsb-tools--schema-on-p))
+      (when (orsb-tools--schema-on-p)
         (orsb-tools--guard (orsb-schema-body-problems (org-roam-node-file parent)
-                                                      (orsb-tools--top-section parent (orsb-arg args 'section))
+                                                      ;; a heading added straight under a note is a new
+                                                      ;; top-level section of its own
+                                                      (or (orsb-tools--top-section parent (orsb-arg args 'section)) title)
                                                       "append")))
-      (let ((status (when-let ((s (orsb-arg args 'status)))
-                      (if (and parent (orsb-tools--schema-on-p)) s (orsb-tools--check-status s type)))))
-        (orsb-tools--change
-         args "create_node" (format "create %s" title)
-         (lambda ()
-           (let ((node
-                  (if parent
-                      (orsb-core-insert-heading parent title
-                                                :section (orsb-arg args 'section)
-                                                :body (orsb-arg args 'body)
-                                                :properties (append (orsb-arg-props args 'properties)
-                                                                    (when status `(("STATUS" . ,status))))
-                                                :todo (orsb-arg args 'todo)
-                                                :tags (orsb-arg-list args 'tags)
-                                                :scheduled (orsb-arg args 'scheduled)
-                                                :deadline (orsb-arg args 'deadline))
-                    (orsb-core-create-node type title
-                                           :body (orsb-arg args 'body)
-                                           :status status
-                                           :next-action (orsb-arg args 'next_action)
-                                           :context (orsb-arg args 'context)
-                                           :follow-ups (orsb-arg-list args 'follow_ups)
-                                           :one-liner (orsb-arg args 'one_liner)
-                                           :due-date (orsb-arg args 'due_date)
-                                           :hugo-section (orsb-arg args 'hugo_section)
-                                           :tags (orsb-arg-list args 'tags)
-                                           :properties (orsb-arg-props args 'properties)))))
-             (append '((created . t)) (orsb-tools--full-record node nil))))))))))
+      (orsb-tools--change
+       args "create_node" (format "create %s" title)
+       (lambda ()
+         (let ((node (orsb-core-insert-heading parent title
+                                               :section (orsb-arg args 'section)
+                                               :body (orsb-arg args 'body)
+                                               :properties (append (orsb-arg-props args 'properties)
+                                                                   (when-let* ((st (orsb-arg args 'status)))
+                                                                     `(("STATUS" . ,st))))
+                                               :todo (orsb-arg args 'todo)
+                                               :tags (orsb-arg-list args 'tags)
+                                               :scheduled (orsb-arg args 'scheduled)
+                                               :deadline (orsb-arg args 'deadline))))
+           (append '((created . t)) (orsb-tools--full-record node nil)))))))))
 
 (defun orsb-tools--child-heading (node heading)
   "The heading titled HEADING inside NODE, as a node.\nThe heading gets an :ID: first if it has none."
@@ -796,10 +753,10 @@ type's properties (next_action for NEXT-ACTION) sets that property."
              (unless (eq (alist-get 'update_links args) :json-false)
                (setq links-updated (orsb-core-propagate-rename node old title)))))
          (when-let ((status (orsb-arg args 'status)))
-           (if (and (orsb-tools--schema-on-p) (= (org-roam-node-level node) 0))
-               ;; the vault's schema names the property and its values; the guard above checked it
-               (orsb-core-set-properties node `((,(orsb-tools--lifecycle-key (org-roam-node-file node)) . ,status)))
-             (orsb-core-set-properties node `(("STATUS" . ,(orsb-tools--check-status status node)))))
+           ;; the vault's schema names the property and its values; the guard above checked them
+           (orsb-core-set-properties
+            node `((,(if (= (org-roam-node-level node) 0) (orsb-tools--lifecycle-key (org-roam-node-file node)) "STATUS")
+                    . ,status)))
            (push "status" changed))
          (when (assq 'todo args)
            (orsb-core-set-todo node (orsb-arg args 'todo)) (push "todo" changed))
@@ -900,7 +857,7 @@ type's properties (next_action for NEXT-ACTION) sets that property."
   (let* ((state (or (orsb-arg args 'state) "open"))
          (kind (or (orsb-arg args 'kind) "all"))
          (node (when-let ((i (orsb-arg args 'id))) (orsb-core-resolve i)))
-         (person (when-let ((p (orsb-arg args 'person)))
+         (mention (when-let ((p (orsb-arg args 'mentions)))
                    (or (ignore-errors (orsb-core-resolve p)) p)))
          (due (orsb-tools--date-arg args 'due_before))
          (query (when-let ((q (orsb-arg args 'query))) (downcase q)))
@@ -921,13 +878,13 @@ type's properties (next_action for NEXT-ACTION) sets that property."
                     (_ (equal (upcase state) (plist-get tk :state))))
                   (or (equal kind "all") (equal kind (plist-get tk :kind)))
                   (or (null range) (and (>= (plist-get tk :line) (car range)) (< (plist-get tk :line) (cdr range))))
-                  (or (null person)
+                  (or (null mention)
                       (let ((text (plist-get tk :text)))
-                        (if (org-roam-node-p person)
-                            (or (string-search (org-roam-node-id person) text)
-                                (string-search (downcase (org-roam-node-title person)) (downcase text))
-                                (equal (plist-get tk :file_id) (org-roam-node-id person)))
-                          (string-search (downcase person) (downcase text)))))
+                        (if (org-roam-node-p mention)
+                            (or (string-search (org-roam-node-id mention) text)
+                                (string-search (downcase (org-roam-node-title mention)) (downcase text))
+                                (equal (plist-get tk :file_id) (org-roam-node-id mention)))
+                          (string-search (downcase mention) (downcase text)))))
                   (or (null due)
                       (let ((d (or (plist-get tk :deadline) (plist-get tk :scheduled))))
                         (and d (not (string> (substring d 0 10) due)))))
@@ -1018,7 +975,7 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
      args "move_node" (format "move %s" (org-roam-node-title node))
      (lambda ()
        (if to-note
-           (let ((path (orsb-core-promote-node node (orsb-arg args 'node_type)
+           (let ((path (orsb-core-promote-node node (orsb-tools--type-directory (or (orsb-arg args 'node_type) "note"))
                                                (not (eq (alist-get 'leave_link args) :json-false)))))
              `((id . ,(org-roam-node-id node)) (title . ,(org-roam-node-title node))
                (action . "promoted") (file . ,(orsb-tools--relative path))))
@@ -1072,13 +1029,11 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
     (orsb-tools--change
      args "log_to_inbox" (format "inbox: %s" (truncate-string-to-width text 60))
      (lambda ()
-       (let* ((created (orsb-core-log-to-inbox text linked))
-              (today (format-time-string "%Y-%m-%d"))
+       (let* ((today (progn (orsb-core-log-to-inbox text linked) (format-time-string "%Y-%m-%d")))
               (entries (orsb-core--inbox-lines today)))
          `((logged . t)
            (ref . ,(plist-get (car (last entries)) :ref))
-           (linked_id . ,(and linked (org-roam-node-id linked)))
-           (created_people . ,(orsb--vector created))))))))
+           (linked_id . ,(and linked (org-roam-node-id linked)))))))))
 
 (defun orsb-tool-resolve-inbox (args)
   "resolve_inbox {ref, target_id, section}."
@@ -1099,42 +1054,39 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
          (today (format-time-string "%Y-%m-%d"))
          (files (seq-filter (lambda (nd) (= (org-roam-node-level nd) 0)) (org-roam-node-list)))
          (records (mapcar #'orsb-tools--light-record files))
-         (projects (seq-filter (lambda (r) (equal (alist-get 'node_type r) "project")) records))
-         (active (seq-sort-by (lambda (r) (or (alist-get 'modified r) "")) #'string>
-                              (seq-filter (lambda (r) (equal (orsb-tools--canonical-status (alist-get 'status r)) "active")) projects)))
-         (stale (seq-filter (lambda (r) (eq (alist-get 'stale r) t)) projects))
+         ;; unfinished notes of every type that has a lifecycle, newest first
+         (open (seq-sort-by (lambda (r) (or (alist-get 'modified r) "")) #'string>
+                            (seq-filter #'identity
+                                        (cl-mapcar (lambda (nd r) (and (orsb-tools--open-p nd (alist-get 'status r)) r))
+                                                   files records))))
+         (stale (seq-filter (lambda (r) (eq (alist-get 'stale r) t)) open))
          (tasks (seq-filter (lambda (tk) (and (not (plist-get tk :done))
                                               (let ((d (or (plist-get tk :deadline) (plist-get tk :scheduled))))
                                                 (and d (not (string> (substring d 0 10) soon))))))
                             (orsb-core-tasks)))
          (tasks (seq-sort-by (lambda (tk) (substring (or (plist-get tk :deadline) (plist-get tk :scheduled)) 0 10)) #'string< tasks))
-         (people (orsb-core-followups))
          (inbox (orsb-core-inbox days))
          (health (orsb-core-health))
-         (dangling (orsb-core-dangling-followups))
          (stale-emb (when (and (orsb-arg-bool args 'check_embeddings) (fboundp 'orsb-search-file-stale-p))
                       (seq-filter (lambda (f) (ignore-errors (orsb-search-file-stale-p f))) (org-roam-list-files)))))
     (cl-flet ((section (items fn)
                 `((total . ,(length items)) (items . ,(orsb--vector (mapcar fn (seq-take items n))))))
               (short (r) (seq-filter #'cdr `((id . ,(alist-get 'id r)) (title . ,(alist-get 'title r))
+                                              (node_type . ,(alist-get 'node_type r))
                                               (status . ,(alist-get 'status r))
                                               (next_action . ,(alist-get 'next_action r))
                                               (days_since_modified . ,(alist-get 'days_since_modified r))))))
       `((generated_at . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
-        (active_projects . ,(section active #'short))
-        (stale_projects . ,(section stale #'short))
+        (open . ,(section open #'short))
+        (stale . ,(section stale #'short))
         (due_tasks . ,(section tasks (lambda (tk) (append (orsb-tools--task-json tk)
                                                           (let ((d (or (plist-get tk :deadline) (plist-get tk :scheduled))))
                                                             (when (string< (substring d 0 10) today) '((overdue . t))))))))
-        (followups . ,(section people (lambda (p) `((id . ,(org-roam-node-id (plist-get p :node)))
-                                                    (title . ,(org-roam-node-title (plist-get p :node)))
-                                                    (items . ,(orsb--vector (plist-get p :followups)))))))
         (inbox . ,(section inbox (lambda (e) `((ref . ,(plist-get e :ref)) (text . ,(plist-get e :text))))))
         (health
          . ((orphans . ,(section (plist-get health :orphans) (lambda (r) `((id . ,(nth 0 r)) (title . ,(nth 3 r)) (file . ,(orsb-tools--relative (nth 1 r)))))))
             (broken_links . ,(section (plist-get health :broken) (lambda (b) `((file . ,(orsb-tools--relative (car b))) (missing_id . ,(cdr b))))))
             (duplicate_titles . ,(section (plist-get health :duplicates) (lambda (d) `((title . ,(car d)) (ids . ,(orsb--vector (cdr d)))))))
-            (dangling_name_links . ,(section dangling (lambda (p) `((name . ,(plist-get p :name)) (file . ,(orsb-tools--relative (plist-get p :file)))))))
             ,@(when stale-emb `((stale_embeddings . ,(section stale-emb (lambda (f) (orsb-tools--relative f))))))))
         (hint . "Open inbox entries close with resolve_inbox ref; tasks with set_checkbox or set_node; orphans with link_nodes.")))))
 
@@ -1216,27 +1168,21 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
     (orsb-tools--get-schema-1)))
 
 (defun orsb-tools--get-schema-1 ()
-  "The whole vocabulary: types, status values, TODO keywords, tags in use."
+  "The whole vocabulary: the types the vault defines, TODO keywords, tags in use."
   (let ((todo (orsb-core--todo-sets)))
     `((version . ,orsb-tools-version)
       (id_forms . ["org-roam id" "path relative to the vault, or absolute" "exact title or alias"
                    "\"today\", \"yesterday\" or YYYY-MM-DD for a daily note"])
-      (node_types . ,(orsb--vector (mapcar (lambda (c) `((type . ,(car c)) (directory . ,(cdr c)))) orsb-directories)))
-      (status_values . ,(orsb--vector orsb-status-values))
-      (blog_status_values . ,(orsb--vector orsb-blog-status-values))
-      (status_aliases . ,(orsb--object orsb-status-aliases))
       (todo_keywords . ((open . ,(orsb--vector (car todo))) (done . ,(orsb--vector (cdr todo)))))
       (tags_in_use . ,(orsb--vector
                        (mapcar #'car (seq-take (org-roam-db-query [:select [tag (funcall count tag)] :from tags
                                                                    :group-by tag :order-by [(desc (funcall count tag))]])
                                                50))))
       (stale_days . ,orsb-stale-days)
-      (property_keys . ,(orsb--vector orsb-known-property-keys))
       (daily_directory . ,orsb-daily-directory)
       (inbox_heading . ,orsb-inbox-heading)
-      (hugo_sections . ,(orsb--vector orsb-hugo-sections))
-      (blog_enabled . ,(if orsb-hugo-base-dir t :json-false))
       (schema_files . ,(if (orsb-schema-present-p) t :json-false))
+      (enforce . ,(symbol-name (orsb-schema-mode)))
       (types . ,(orsb--vector (mapcar #'orsb-tools--type-json (orsb-schema-tree))))
       (envelope . "{ok:true,data} | {ok:false,error:{code,message,hint}} with isError")
       (undo . "Every write returns change_id; restore with that id puts the files back. dry_run:true previews a write without making it."))))
@@ -1478,7 +1424,7 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (limit . ((type . "integer") (default . 5)))
       (cutoff . ((type . "number") (default . 0.5)))))
     ("create_node" orsb-tool-create-node
-     "Create a note of a type, or with parent_id a heading (task, section) inside a note. If a note with the same title exists nothing is created and possible_duplicates is returned; on_duplicate decides."
+     "Create a note of a type, or with parent_id a heading (task, section) inside a note. The type decides the folder, the starting sections and which properties are required (get_schema with type shows them). If a note with the same title exists nothing is created and possible_duplicates is returned; on_duplicate decides."
      ("title")
      ((title . ((type . "string")))
       (node_type . ((type . "string") (default . "note") (description . "A note type; get_schema lists the ones this vault defines")))
@@ -1488,16 +1434,12 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (todo . ((type . "string") (description . "With parent_id: TODO keyword, e.g. TODO")))
       (scheduled . ((type . "string") (description . "With parent_id: YYYY-MM-DD")))
       (deadline . ((type . "string") (description . "With parent_id: YYYY-MM-DD")))
-      (status . ((type . "string")))
-      (next_action . ((type . "string") (description . "project: next action")))
-      (due_date . ((type . "string") (description . "admin: YYYY-MM-DD")))
-      (one_liner . ((type . "string") (description . "idea: one-line summary")))
-      (context . ((type . "string") (description . "person: how you know them")))
-      (follow_ups . (,@orsb-tools--string-list (description . "person: follow-up items")))
-      (hugo_section . ((type . "string") (description . "blog: Hugo section")))
+      (status . ((type . "string") (description . "The type's lifecycle value, when it has one")))
       (tags . ,orsb-tools--string-list)
-      (properties . ((type . "object") (additionalProperties . ((type . "string")))))
-      (on_duplicate . ((type . "string") (enum . ("ask" "use_existing" "create")) (default . "ask")))))
+      (properties . ((type . "object") (additionalProperties . ((type . "string")))
+                     (description . "The note's properties; get_schema with type lists the ones its type requires")))
+      (on_duplicate . ((type . "string") (enum . ("ask" "use_existing" "create")) (default . "ask")))
+      ,orsb-tools--dry-run-schema))
     ("set_node" orsb-tool-set-node
      "Change a note's or heading's metadata, not its text: title (links to it are updated), status, todo, scheduled, deadline, properties (null deletes one), tags, aliases, keywords. heading picks a heading inside the note by its title."
      ("id")
@@ -1537,12 +1479,12 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (checked . ((type . "boolean") (default . t)))
       ,orsb-tools--dry-run-schema))
     ("get_tasks" orsb-tool-get-tasks
-     "Open tasks across all notes: TODO headings and unchecked checkboxes, dated ones first. Filter by state, kind, note (id), person, due_before or query."
+     "Open tasks across all notes: TODO headings and unchecked checkboxes, dated ones first. Filter by state, kind, note (id), mentions, due_before or query."
      ()
      ((state . ((type . "string") (default . "open") (description . "open, done, all, or a keyword like WAITING")))
       (kind . ((type . "string") (enum . ("all" "todo" "checkbox")) (default . "all")))
       ,orsb-tools--id-schema
-      (person . ((type . "string") (description . "Tasks mentioning this person (name or id)")))
+      (mentions . ((type . "string") (description . "Tasks that mention this name or link to this note id")))
       (due_before . ((type . "string") (description . "YYYY-MM-DD, today, tomorrow or +N days")))
       (query . ((type . "string") (description . "Text the task contains")))
       (limit . ((type . "integer") (default . 30)))
@@ -1590,7 +1532,7 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (timestamp . ((type . "string") (description . "HH:MM, default now")))
       (type . ((type . "string") (enum . ("journal" "todo")) (default . "journal")))))
     ("log_to_inbox" orsb-tool-log-to-inbox
-     "Add one line to today's inbox for later filing, optionally linked to a note. Returns its ref for resolve_inbox. [[Name]] creates a person note when none exists."
+     "Add one line to today's inbox for later filing, optionally linked to a note. Returns its ref for resolve_inbox."
      ("text")
      ((text . ((type . "string")))
       (linked_id . ((type . "string") (description . "Note the entry is about")))
@@ -1603,7 +1545,7 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (section . ((type . "string") (description . "Heading in the target")))
       ,orsb-tools--dry-run-schema))
     ("get_review" orsb-tool-get-review
-     "What needs attention, in one call: active and stale projects, tasks due within 3 days, follow-ups, open inbox entries with refs, and vault health (orphans, broken links, duplicate titles)."
+     "What needs attention, in one call: open (unfinished notes of every type that has a lifecycle) and the stale ones among them, tasks due within 3 days, open inbox entries with refs, and vault health (orphans, broken links, duplicate titles)."
      ()
      ((limit . ((type . "integer") (default . 10) (description . "Items per list")))
       (days . ((type . "integer") (default . 7) (description . "Inbox days to include")))
@@ -1664,46 +1606,6 @@ With propose in ARGS the call is filed as a proposal instead of run."
   (dolist (def orsb-tools--definitions)
     (apply #'orsb-tools--register-def def))
   (message "orsb-tools: %d tools registered" (hash-table-count org-roam-mcp-http--tools)))
-
-;;;; Status migration
-
-(defun orsb-migrate-status (&optional apply)
-  "Report (and with APPLY, rewrite) STATUS values that are not canonical.
-Interactively, shows the report; with a prefix argument, applies it.
-Also moves a #+STATUS: keyword into the drawer.  Unrecognized free-text
-values are listed and left alone; blog nodes keep their own lifecycle."
-  (interactive "P")
-  (let ((plan nil) (unknown nil) (blog 0))
-    (dolist (node (seq-filter (lambda (n) (= (org-roam-node-level n) 0)) (org-roam-node-list)))
-      (let* ((props (org-roam-node-properties node))
-             (drawer (cdr (assoc "STATUS" props)))
-             (kw (cdr (assoc "STATUS" (orsb-core-node-keywords node))))
-             (raw (or drawer kw)))
-        (when raw
-          (if (orsb-core-blog-node-p node)
-              (setq blog (1+ blog))
-            (let ((canon (orsb-tools--canonical-status raw)))
-              (cond
-               ((null canon) (push (cons (org-roam-node-title node) raw) unknown))
-               ((or kw (not (equal raw canon)))
-                (push (list node raw canon (and kw t)) plan))))))))
-    (when apply
-      (dolist (p plan)
-        (pcase-let ((`(,node ,_raw ,canon ,from-kw) p))
-          (orsb-core-set-properties node `(("STATUS" . ,canon)))
-          (when from-kw (orsb-core-set-keywords node '(("STATUS" . nil)))))))
-    (let ((report
-           (concat (format "%s %d status value(s):\n" (if apply "Rewrote" "Would rewrite") (length plan))
-                   (mapconcat (lambda (p) (format "  %s: %S -> %S%s" (org-roam-node-title (car p)) (nth 1 p) (nth 2 p)
-                                                  (if (nth 3 p) " (from #+STATUS:)" "")))
-                              (reverse plan) "\n")
-                   (format "\n%d unrecognized value(s) left alone:\n" (length unknown))
-                   (mapconcat (lambda (u) (format "  %s: %S" (car u) (cdr u))) (reverse unknown) "\n")
-                   (format "\n%d blog note(s) keep their own lifecycle (%s)." blog (string-join orsb-blog-status-values "/")))))
-      (if (called-interactively-p 'any)
-          (with-current-buffer (get-buffer-create "*orsb status migration*")
-            (erase-buffer) (insert report) (display-buffer (current-buffer)))
-        report))))
 
 (provide 'orsb-tools)
 ;;; orsb-tools.el ends here

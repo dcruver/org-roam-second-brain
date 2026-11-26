@@ -6,13 +6,16 @@ rely on, semantic search over your vault, a daily digest, and an **MCP server**
 so an LLM assistant uses the same notes you do. Everything is Emacs Lisp; the
 only external service is an OpenAI-compatible embeddings endpoint (optional).
 
-Version 2.1 has one core and one contract, sized for small local models:
+Version 3.0 has one core and one contract, sized for small local models, and
+no note types of its own: a vault describes its types in `_schema.org` files
+(see [Note types](#note-types-_schemaorg)).
 
 | Module | What it is |
 |---|---|
-| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create typed notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
-| `orsb-tools.el` | The 19-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, one status vocabulary, and an undo journal behind every write. `MIGRATION.md` maps the tool names of earlier versions onto these. |
+| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
+| `orsb-tools.el` | The 22-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, the vault's own rules applied to every write, proposals, and an undo journal behind every write. `MIGRATION.md` maps the tool names of earlier versions onto these. |
 | `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
+| `orsb-schema.el` | Note types and their rules, read from the vault's `_schema.org` files: inheritance down the folders, the check of existing notes, the rules a write must keep. Needs no org-roam database. |
 | `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
 | `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
 | `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
@@ -50,20 +53,87 @@ Everything environment-specific is a defcustom in the `orsb` group:
 
 ```elisp
 (setq org-roam-directory "~/org-roam")
-;; vault layout (defaults shown)
-(setq orsb-directories '(("project" . "projects") ("person" . "people") ("idea" . "ideas")
-                         ("admin" . "admin") ("blog" . "blog") ("reference" . "reference")
-                         ("howto" . "howto") ("note" . "")))
+;; the two folders the package itself uses (defaults shown)
 (setq orsb-daily-directory "daily" orsb-archive-directory "archive")
-;; status vocabulary and staleness
-(setq orsb-status-values '("active" "waiting" "blocked" "someday" "done" "cancelled")
-      orsb-stale-days 5)
-;; blog posts (ox-hugo); nil refuses blog creation
-(setq orsb-hugo-base-dir "~/Projects/my-site/" orsb-hugo-sections '("homelab" "writing"))
+;; days without a change before unfinished work counts as stale
+(setq orsb-stale-days 5)
 ;; semantic search (any OpenAI-compatible /embeddings endpoint, e.g. Ollama or Infinity)
 (setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
       org-roam-semantic-embedding-model "nomic-embed-text")
 ```
+
+## Note types: `_schema.org`
+
+The package defines no note types. A folder becomes a type when it holds a
+`_schema.org` that sets `TYPE`; a folder without one is grouping only. A
+folder's rules are the vault root's file, then each `_schema.org` on the way
+down, merged: a lower file's entry replaces the same one from above, new
+entries are added, and a table row whose second column is `remove` deletes an
+inherited one. So a note's type is where it lives, a folder says what a note
+*is a kind of*, and what a note *has* or *belongs to* is a property whose
+form is a link. The files carry no `:ID:`, so they are not notes.
+
+```org
+* Type
+:PROPERTIES:
+:TYPE: project
+:WRITE: open                 # open | append | propose | readonly
+:LIFECYCLE: STATUS           # the property that says how far along it is
+:LIFECYCLE_VALUES: active waiting done
+:LIFECYCLE_FINISHED: done
+:END:
+
+* Properties
+| property    | required | form                        | default |
+|-------------+----------+-----------------------------+---------|
+| STATUS      | yes      | one of LIFECYCLE_VALUES     | active  |
+| NEXT-ACTION | yes      | one sentence                |         |
+| IDEA        | no       | link to a note of type idea |         |
+
+* Sections
+| section       | required | rule    |
+|---------------+----------+---------|
+| Current state | yes      | replace |
+| Log           | yes      | append  |
+| Decisions     | no       | propose |
+
+* Keywords
+| keyword | value    |
+|---------+----------|
+| date    | [%DATE%] |
+
+* Template
+** Current state
+As of %DATE%.
+** Log
+```
+
+- Forms the server checks: `id`, `one of A B C` (or the name of a Type key
+  holding the list), `date`, `URL`, `four digits`, `link` and `link to a note
+  of type T`. Anything else is a description.
+- `date, set by the server` is filled in on creation. Defaults, keyword
+  values and the template may use `%DATE%`, `%TITLE%` and `%SLUG%`.
+- Section rules: `replace` (rewritten whole), `append` (only grows),
+  `propose` (needs approval). A type's `WRITE` does the same for the whole
+  note; `NEVER: move merge delete` forbids those operations.
+- The root file may also set `EXCLUDE` (subfolders outside the rules),
+  `NOTES_HERE: no` (no note directly in this folder) and `ENFORCE`:
+  `strict` refuses a write that breaks a rule, `warn` (the default) makes it
+  and lists what it broke under `warnings`, `off` ignores the rules.
+- A vault with no `_schema.org` has one type, `note`, and no rules.
+
+`check_schema` lists where existing notes depart from the rules; it changes
+nothing. `get_schema` lists the types found, and with `type` one type's
+merged rules.
+
+**Proposals.** Any write tool takes `propose: true` (and a `reason`): the
+change is worked out, stored with its line-by-line preview, and nothing is
+written. `get_proposals` lists what is waiting; `decide_proposal` approves
+(applies it, returning a `change_id`) or rejects. A proposal whose note
+changed since it was filed is refused unless forced. Proposing lifts only the
+`propose` rules; every other rule still holds. The server cannot tell callers
+apart: restricting who may call `decide_proposal` is the job of whatever sits
+in front of it.
 
 ## The MCP server
 
@@ -100,24 +170,25 @@ error says what to do next.
 | `set_node` | title (link text elsewhere follows), status, todo, scheduled, deadline, properties, tags, aliases, keywords; `heading` picks a heading by title |
 | `update_body` | append / prepend / replace, per section or whole note (guarded); a missing section is an error listing the real ones |
 | `set_checkbox` | tick or untick one checklist item, by its text or index |
-| `get_tasks` | open TODO headings and checkboxes across the vault, dated first; filter by state, note, person, due date, text |
+| `get_tasks` | open TODO headings and checkboxes across the vault, dated first; filter by state, note, mentions, due date, text |
 | `link_nodes` | add (idempotent) or remove a link; `both_ways`; removing a link inside a sentence keeps the words |
 | `move_node` | refile a heading under another note or heading, or make it a note of its own; links keep working |
 | `merge_nodes` | fold one note into another as a section; links to it keep working |
 | `delete_node` | delete a heading, or archive (default) / delete a note; returns the notes that linked to it |
 | `add_daily_entry` | a structured entry in today's (or a given day's) daily note |
 | `log_to_inbox`, `resolve_inbox` | add a line to today's inbox and get its ref; later mark it done, optionally filing it into a note |
-| `get_review` | one call for what needs attention: projects, due tasks, follow-ups, open inbox entries, vault health |
+| `get_review` | one call for what needs attention: unfinished notes of every type with a lifecycle and the stale ones among them, due tasks, open inbox entries, vault health |
 | `restore` | undo any write by its `change_id`, or list recent changes |
-| `get_schema` | the vocabulary the server enforces: types, statuses, TODO keywords, tags in use |
+| `get_schema` | the vocabulary the server enforces: the types the vault defines, TODO keywords, tags in use; with `type`, that type's rules |
+| `check_schema` | where existing notes depart from the vault's rules (read-only) |
+| `get_proposals`, `decide_proposal` | changes filed for approval: list or show them, approve or reject |
 
 Every tool takes `id` as an org-roam id, a vault-relative path, an exact
 title or alias, or `today` / `yesterday` / `YYYY-MM-DD` for a daily note. An
 ambiguous title is an error listing the candidates. Answers are
 `{"ok":true,"data":{...}}` or `{"ok":false,"error":{"code","message","hint"}}`
-(with MCP `isError`). Status is validated: `active | waiting | blocked |
-someday | done | cancelled` for notes, `idea | stub | draft | published` for
-blog posts. `M-x orsb-migrate-status` normalizes older spellings in a vault.
+(with MCP `isError`). A type's lifecycle value (`status`) is checked against
+the values its `_schema.org` allows.
 
 Every write is recorded: the answer carries a `change_id`, and `restore`
 with it puts every file the write touched back as it was (a restore is

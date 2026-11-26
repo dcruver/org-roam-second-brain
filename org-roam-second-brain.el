@@ -2,7 +2,7 @@
 
 ;; Author: David Cruver <dcruver@users.noreply.github.com>
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 2.0.0
+;; Version: 3.0.0
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.2"))
 
 ;;; Commentary:
@@ -80,12 +80,15 @@ Alist mapping node type symbols to subdirectory names under `org-roam-directory'
   :type 'string
   :group 'sb)
 
-;; The Hugo settings live in orsb-core (`orsb-hugo-base-dir', nil by default so
-;; a fresh install refuses blog creation until it is configured, and
-;; `orsb-hugo-sections'); the sb/ names remain as aliases.
-(defvaralias 'sb/hugo-base-dir 'orsb-hugo-base-dir)
+(defcustom sb/hugo-base-dir nil
+  "Hugo site directory the blog commands export to; nil disables them."
+  :type '(choice (const :tag "Not configured" nil) directory)
+  :group 'sb)
 
-(defvaralias 'sb/hugo-sections 'orsb-hugo-sections)
+(defcustom sb/hugo-sections nil
+  "Hugo sections offered by the blog commands."
+  :type '(repeat string)
+  :group 'sb)
 
 (defcustom sb/blog-llm-function nil
   "Function to call for LLM operations in blog writing.
@@ -591,15 +594,23 @@ Returns plist with :concepts and :dailies lists, each containing
 "))
 
 (defun sb/core-create-blog (title section &optional slug)
-  "Create a blog post node with TITLE for SECTION (via `orsb-core-create-node').
+  "Create a blog post node with TITLE for SECTION.
 SLUG is optional; if nil, generated from title.
 Returns plist with :id, :file, :title, :section, :slug."
-  (let* ((node (orsb-core-create-node "blog" title
-                                      :hugo-section section
-                                      :body (sb/--blog-template title section)))
-         (slug (or slug (orsb-core--slug title))))
-    (when (and slug (not (equal slug (orsb-core--slug title))))
-      (orsb-core-set-properties node `(("EXPORT_FILE_NAME" . ,slug))))
+  (unless sb/hugo-base-dir
+    (user-error "Set `sb/hugo-base-dir' to use the blog commands"))
+  (let* ((slug (or slug (orsb-core--slug title)))
+         (node (orsb-core-create-node
+                title
+                :dir (expand-file-name (alist-get 'blog sb/directories) org-roam-directory)
+                :drawer `(("STATUS" . "draft")
+                          ("EXPORT_FILE_NAME" . ,slug)
+                          ("EXPORT_HUGO_SECTION" . ,(format "%s/posts" section)))
+                :keywords `(("date" . ,(format-time-string "[%Y-%m-%d %a]"))
+                            ("hugo_base_dir" . ,sb/hugo-base-dir)
+                            ("hugo_draft" . "true")
+                            ("hugo_categories" . ,(capitalize (replace-regexp-in-string "-" " " section))))
+                :body (sb/--blog-template title section))))
     (list :id (org-roam-node-id node) :file (org-roam-node-file node)
           :title title :section section :slug slug)))
 

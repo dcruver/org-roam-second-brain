@@ -92,8 +92,8 @@ Neighbor; has a truck.
     (should (equal (orsb-st--texts (orsb-st--data "get_tasks" 'state "WAITING") 'tasks)
                    '("Soil delivery from [[id:p-1][Sam Lee]]")))
     ;; by person: the link (by id) or the full name; a bare first name is not enough
-    (should (= (length (alist-get 'tasks (orsb-st--data "get_tasks" 'person "Sam Lee"))) 1))
-    (should (= (length (alist-get 'tasks (orsb-st--data "get_tasks" 'person "Sam"))) 2))
+    (should (= (length (alist-get 'tasks (orsb-st--data "get_tasks" 'mentions "Sam Lee"))) 1))
+    (should (= (length (alist-get 'tasks (orsb-st--data "get_tasks" 'mentions "Sam"))) 2))
     (should (= (length (alist-get 'tasks (orsb-st--data "get_tasks" 'query "screws"))) 2))
     (should (member "Pick a spot" (orsb-st--texts (orsb-st--data "get_tasks" 'state "done") 'tasks)))
     (let ((page (orsb-st--data "get_tasks" 'limit 2)))
@@ -260,11 +260,11 @@ Neighbor; has a truck.
         (orsb-st--data "restore" 'change_id (alist-get 'change_id m))
         (should (equal (orsb-test--file "projects/garden.org") garden)))
       ;; promote to a note of its own, keeping the id
-      (let ((p (orsb-st--data "move_node" 'id hid 'to_note t 'node_type "reference")))
+      (let ((p (orsb-st--data "move_node" 'id hid 'to_note t)))
         (should (equal (alist-get 'action p) "promoted"))
         (let ((n (orsb-st--data "get_node" 'id hid)))
           (should (= (alist-get 'level n) 0))
-          (should (equal (alist-get 'node_type n) "reference"))
+          (should (equal (alist-get 'node_type n) "note"))
           (should (string-match-p "Three bins" (alist-get 'body n))))
         ;; the new file holds the heading's body once, with one :ID:
         (let ((text (orsb-test--file (alist-get 'file p))))

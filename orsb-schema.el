@@ -25,9 +25,13 @@
 ;;
 ;;   * Type        a property drawer (TYPE, WRITE, NOTES_HERE, EXCLUDE,
 ;;                 LIFECYCLE, ... any key), then free text
-;;   * Properties  a table: property | required | form
+;;   * Properties  a table: property | required | form | default
 ;;   * Sections    a table: section | required | rule
+;;   * Keywords    a table: keyword | value   (#+KEYWORD: lines of a new note)
 ;;   * Template    the body a new note of this type starts with
+;;
+;; Defaults, keyword values and the template may use %DATE%, %TITLE% and
+;; %SLUG%, filled in when a note is created.
 ;;
 ;; The file has no org-roam :ID:, so it is not a note.
 ;;
@@ -109,8 +113,9 @@ Each row is a list of trimmed cell strings."
 
 (defun orsb-schema-parse-string (text)
   "Parse the contents TEXT of a schema file.
-Return an alist with keys `type' (drawer alist), `properties' and `sections'
-\(lists of rows) and, only when the file has a Template heading, `template'."
+Return an alist with keys `type' (drawer alist), `properties', `sections' and
+`keywords' (lists of rows) and, only when the file has a Template heading,
+`template'."
   (let ((sections (orsb-schema--sections text)) out)
     (when-let* ((b (cdr (assoc "type" sections))))
       (push (cons 'type (orsb-schema--drawer b)) out))
@@ -118,6 +123,8 @@ Return an alist with keys `type' (drawer alist), `properties' and `sections'
       (push (cons 'properties (orsb-schema--table b)) out))
     (when-let* ((b (cdr (assoc "sections" sections))))
       (push (cons 'sections (orsb-schema--table b)) out))
+    (when-let* ((b (cdr (assoc "keywords" sections))))
+      (push (cons 'keywords (orsb-schema--table b)) out))
     (when-let* ((cell (assoc "template" sections)))
       (push (cons 'template (orsb-schema--template (cdr cell))) out))
     (nreverse out)))
@@ -163,7 +170,9 @@ new one is appended; one whose second column is \"remove\" deletes it."
                    (cons 'properties (orsb-schema--merge-rows (alist-get 'properties parent)
                                                               (alist-get 'properties child)))
                    (cons 'sections (orsb-schema--merge-rows (alist-get 'sections parent)
-                                                            (alist-get 'sections child))))))
+                                                            (alist-get 'sections child)))
+                   (cons 'keywords (orsb-schema--merge-rows (alist-get 'keywords parent)
+                                                            (alist-get 'keywords child))))))
     (if-let* ((tpl (or (assq 'template child) (assq 'template parent))))
         (append out (list (cons 'template (cdr tpl))))
       out)))
@@ -565,13 +574,42 @@ gets the date of TIME (now by default)."
           (push (cons (upcase (car row)) (format-time-string "[%Y-%m-%d]" time)) out))))
     (nreverse out)))
 
+(defun orsb-schema--slug (title)
+  "TITLE as a lowercase, hyphenated file-name stem."
+  (string-trim (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase (or title ""))) "-+" "-+"))
+
+(defun orsb-schema-fill (text title &optional time)
+  "Return TEXT with %DATE%, %TITLE% and %SLUG% filled in for a note TITLE."
+  (let* ((text (replace-regexp-in-string "%DATE%" (format-time-string "%Y-%m-%d" time) (or text "") t t))
+         (text (replace-regexp-in-string "%TITLE%" (or title "") text t t)))
+    (replace-regexp-in-string "%SLUG%" (orsb-schema--slug title) text t t)))
+
+(defun orsb-schema-default-properties (schema title &optional time)
+  "Return the properties SCHEMA gives a new note titled TITLE by default.
+An alist from the fourth column of the Properties table."
+  (let (out)
+    (dolist (row (alist-get 'properties schema))
+      (let ((default (nth 3 row)))
+        (when (and default (not (string-empty-p default)))
+          (push (cons (upcase (car row)) (orsb-schema-fill default title time)) out))))
+    (nreverse out)))
+
+(defun orsb-schema-new-keywords (schema title &optional time)
+  "Return the #+KEYWORD lines SCHEMA gives a new note titled TITLE, as an alist."
+  (mapcar (lambda (row) (cons (car row) (orsb-schema-fill (or (nth 1 row) "") title time)))
+          (seq-remove (lambda (row) (string-empty-p (or (nth 1 row) ""))) (alist-get 'keywords schema))))
+
+(defun orsb-schema-finished-p (schema value)
+  "Non-nil when VALUE of SCHEMA's lifecycle property means the note is closed."
+  (and value
+       (member (downcase value)
+               (split-string (downcase (or (orsb-schema-get schema "LIFECYCLE_FINISHED") "")) "[ ,]+" t))))
+
 (defun orsb-schema-new-body (schema title &optional body time)
   "Return the body a new note of SCHEMA titled TITLE starts with.
-The template with %DATE% and %TITLE% filled in; BODY, when given, goes before
-the template's first heading."
-  (let* ((tpl (or (alist-get 'template schema) ""))
-         (tpl (replace-regexp-in-string "%DATE%" (format-time-string "%Y-%m-%d" time) tpl t t))
-         (tpl (replace-regexp-in-string "%TITLE%" (or title "") tpl t t))
+The template with %DATE%, %TITLE% and %SLUG% filled in; BODY, when given,
+goes before the template's first heading."
+  (let* ((tpl (orsb-schema-fill (or (alist-get 'template schema) "") title time))
          (body (and body (not (string-blank-p body)) (string-trim-right body))))
     (cond ((string-empty-p tpl) body)
           ((not body) tpl)

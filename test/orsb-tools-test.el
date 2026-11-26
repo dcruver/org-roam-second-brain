@@ -51,9 +51,11 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
 (ert-deftest orsb-tools-schema-and-the-one-tool-set ()
   (orsb-test-with-vault
     (let ((schema (orsb-tools-test--data "get_schema")))
-      (should (member "waiting" (alist-get 'status_values schema)))
       (should (equal (alist-get 'stale_days schema) orsb-stale-days))
-      (should (equal (cdr (assq 'completed (alist-get 'status_aliases schema))) "done")))
+      (should (equal (alist-get 'enforce schema) "off"))
+      ;; nothing of any particular vault is built in
+      (dolist (gone '(node_types status_values blog_status_values status_aliases property_keys hugo_sections blog_enabled))
+        (should-not (assq gone schema))))
     ;; exactly these twenty-two: no old names, no profiles
     (orsb-tools-test--ensure-registered)
     (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
@@ -76,7 +78,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'id by-title) "1784854105"))
       (should (equal (alist-get 'id by-path) "1784854105"))
       (should (equal (alist-get 'status by-id) "active"))
-      (should (equal (alist-get 'node_type by-id) "project"))
+      (should (equal (alist-get 'node_type by-id) "note"))
       (should (equal (alist-get 'NEXT-ACTION (alist-get 'properties by-id)) "Phase 4 status curation."))
       (should (equal (alist-get 'TITLE (alist-get 'keywords by-id)) "Project Backlog"))
       (should (equal (alist-get 'file by-id) "projects/project-backlog-1784854105.org"))
@@ -89,15 +91,14 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (let ((err (orsb-tools-test--error "get_node" 'id "1784854105" 'section "Nope")))
       (should (equal (alist-get 'code err) "not_found")))))
 
-(ert-deftest orsb-tools-set-node-status-validated-and-written ()
+(ert-deftest orsb-tools-set-node-status-written ()
   (orsb-test-with-vault
-    (let ((d (orsb-tools-test--data "set_node" 'id "Project Backlog" 'status "WAITING")))
+    ;; without schema files a status is just a property: written as given, any value
+    (let ((d (orsb-tools-test--data "set_node" 'id "Project Backlog" 'status "waiting")))
       (should (equal (alist-get 'status d) "waiting"))
       (should (equal (alist-get 'changed d) '("status"))))
     (should (string-match-p "^:STATUS: +waiting$" (orsb-test--file "projects/project-backlog-1784854105.org")))
-    (let ((err (orsb-tools-test--error "set_node" 'id "1784854105" 'status "shelved")))
-      (should (equal (alist-get 'code err) "invalid_argument"))
-      (should (string-match-p "someday" (alist-get 'message err))))
+    (orsb-tools-test--data "set_node" 'id "1784854105" 'status "shelved")
     (let ((err (orsb-tools-test--error "set_node" 'id "1784854105")))
       (should (equal (alist-get 'code err) "invalid_argument")))
     (let ((err (orsb-tools-test--error "set_node" 'id "1784854105" 'todo "DONE")))
@@ -145,12 +146,15 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (let ((all (orsb-tools-test--data "list_nodes")))
       (should (= (alist-get 'total all) 2))
       (should (member "Project Backlog" (mapcar (lambda (n) (alist-get 'title n)) (alist-get 'nodes all)))))
-    (let ((projects (orsb-tools-test--data "list_nodes" 'node_type "project")))
-      (should (= (alist-get 'total projects) 1))
-      (should (eq (alist-get 'stale (car (alist-get 'nodes projects))) :json-false)))
+    ;; no schema files: every note is a "note", and none has a lifecycle to go stale in
+    (let ((notes (orsb-tools-test--data "list_nodes" 'node_type "note")))
+      (should (= (alist-get 'total notes) 2))
+      (should (eq (alist-get 'stale (car (alist-get 'nodes notes))) :json-false)))
+    (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'node_type "project")) 0))
+    (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'status "ACTIVE")) 1))
     (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'status "done")) 0))
     (should (= (alist-get 'total (orsb-tools-test--data "list_nodes" 'tags ["backlog"])) 1))
-    (let ((p (orsb-tools-test--data "list_nodes" 'node_type "project")))
+    (let ((p (orsb-tools-test--data "list_nodes" 'tags ["backlog"])))
       (should (equal (alist-get 'next_action (car (alist-get 'nodes p))) "Phase 4 status curation.")))
     (let ((page (orsb-tools-test--data "list_nodes" 'limit 1)))
       (should (= (alist-get 'returned page) 1))
@@ -172,13 +176,15 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
 
 (ert-deftest orsb-tools-create-heading-link-delete ()
   (orsb-test-with-vault
-    (let* ((created (orsb-tools-test--data "create_node" 'node_type "project" 'title "Rebuild the shed"
-                                           'body "Needs a roof." 'next_action "Buy lumber" 'tags ["home"]))
+    ;; a vault without schema files has one type, "note", kept in its top folder
+    (let* ((created (orsb-tools-test--data "create_node" 'title "Rebuild the shed" 'body "Needs a roof."
+                                           'status "active" 'properties '((NEXT-ACTION . "Buy lumber")) 'tags ["home"]))
            (id (alist-get 'id created)))
-      (should (equal (alist-get 'node_type created) "project"))
+      (should (equal (alist-get 'node_type created) "note"))
       (should (equal (alist-get 'status created) "active"))
       (should (equal (alist-get 'NEXT-ACTION (alist-get 'properties created)) "Buy lumber"))
-      (should (string-prefix-p "projects/" (alist-get 'file created)))
+      (should-not (string-match-p "/" (alist-get 'file created)))
+      (should-not (alist-get 'NODE-TYPE (alist-get 'properties created)))
       (should (member "home" (alist-get 'tags created)))
       (let ((h (orsb-tools-test--data "create_node" 'parent_id id 'title "Materials" 'body "- lumber" 'todo "TODO")))
         (should (= (alist-get 'level h) 1))
@@ -220,31 +226,6 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (orsb-tools-test--ensure-registered)
     (let ((rpc (orsb-test--json (org-roam-mcp-http--handle-tools-call '((name . "get_node") (arguments . ()))))))
       (should (= (alist-get 'code (alist-get 'error rpc)) -32602)))))
-
-(ert-deftest orsb-tools-migrate-status-report-and-apply ()
-  (orsb-test-with-vault
-    (orsb-test--write "projects/old-1.org" ":PROPERTIES:\n:ID: m-1\n:NODE-TYPE: project\n:STATUS: completed\n:END:\n#+title: Old One\n")
-    (orsb-test--write "projects/old-2.org" ":PROPERTIES:\n:ID: m-2\n:NODE-TYPE: project\n:END:\n#+title: Old Two\n#+STATUS: shelved\n")
-    (orsb-test--write "projects/old-3.org" ":PROPERTIES:\n:ID: m-3\n:NODE-TYPE: project\n:STATUS: pass1-verified\n:END:\n#+title: Old Three\n")
-    (orsb-test--write "blog/post.org" ":PROPERTIES:\n:ID: b-1\n:NODE-TYPE: blog\n:STATUS: published\n:END:\n#+title: A Post\n")
-    (org-roam-db-sync)
-    (let ((report (orsb-migrate-status)))
-      (should (string-match-p "Would rewrite 2" report))
-      (should (string-match-p "Old One: \"completed\" -> \"done\"" report))
-      (should (string-match-p "Old Two: \"shelved\" -> \"someday\" (from #\\+STATUS:)" report))
-      (should (string-match-p "1 unrecognized" report))
-      (should (string-match-p "1 blog note(s) keep their own lifecycle" report)))
-    (orsb-migrate-status t)
-    (should (string-match-p "^:STATUS: +done$" (orsb-test--file "projects/old-1.org")))
-    (let ((two (orsb-test--file "projects/old-2.org")))
-      (should (string-match-p "^:STATUS: +someday$" two))
-      (should-not (string-match-p "^#\\+STATUS:" two)))
-    (should (string-match-p "pass1-verified" (orsb-test--file "projects/old-3.org")))
-    (should (string-match-p "^:STATUS: +published$" (orsb-test--file "blog/post.org")))
-    ;; blog nodes validate against their own vocabulary
-    (should (equal (alist-get 'status (orsb-tools-test--data "set_node" 'id "b-1" 'status "draft")) "draft"))
-    (should (equal (alist-get 'code (orsb-tools-test--error "set_node" 'id "b-1" 'status "done")) "invalid_argument"))
-    (should (equal (alist-get 'code (orsb-tools-test--error "set_node" 'id "m-1" 'status "published")) "invalid_argument"))))
 
 ;;;; schema files
 
@@ -293,12 +274,23 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
                             "| CREATED | no | date, set by the server |\n"))
   (orsb-test--write "projects/_schema.org"
                     (concat "* Type\n:PROPERTIES:\n:TYPE: project\n:NOTES_HERE: yes\n:LIFECYCLE: STATUS\n"
-                            ":LIFECYCLE_VALUES: active waiting done\n:END:\n\n"
+                            ":LIFECYCLE_VALUES: active waiting done\n:LIFECYCLE_FINISHED: done\n:END:\n\n"
                             "* Properties\n| property | required | form |\n|-\n"
                             "| STATUS | yes | one of LIFECYCLE_VALUES |\n| NEXT-ACTION | yes | one sentence |\n\n"
                             "* Sections\n| section | required | rule |\n|-\n"
                             "| Current state | yes | replace |\n| Log | yes | append |\n| Design | no | propose |\n\n"
                             "* Template\n** Current state\nAs of %DATE%.\n** Log\n** Design\n"))
+  (orsb-test--write "projects/posts/_schema.org"
+                    (concat "* Type\n:PROPERTIES:\n:TYPE: post\n:LIFECYCLE_VALUES: draft published\n"
+                            ":LIFECYCLE_FINISHED: published\n:END:\n\n"
+                            "* Properties\n| property | required | form | default |\n|-\n"
+                            "| STATUS | yes | one of LIFECYCLE_VALUES | draft |\n"
+                            "| NEXT-ACTION | remove | | |\n"
+                            "| EXPORT_FILE_NAME | yes | text | %SLUG% |\n\n"
+                            "* Sections\n| section | required | rule |\n|-\n"
+                            "| Current state | remove | |\n| Log | remove | |\n| Design | remove | |\n\n"
+                            "* Keywords\n| keyword | value |\n|-\n| date | [%DATE%] |\n| hugo_draft | true |\n\n"
+                            "* Template\n** Draft\n"))
   (orsb-test--write "telos/_schema.org"
                     "* Type\n:PROPERTIES:\n:TYPE: telos\n:NOTES_HERE: yes\n:WRITE: propose\n:NEVER: move merge delete\n:END:\n")
   (orsb-test--write "telos/mission.org" ":PROPERTIES:\n:ID: telos-mission\n:END:\n#+title: Mission\n\nTo make things.\n")
@@ -380,6 +372,58 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (let ((ok (orsb-tools-test--data "create_node" 'title "Whole plan" 'node_type "project"
                                      'status "active" 'next_action "Go")))
       (should-not (alist-get 'warnings ok)))))
+
+;;;; defaults, keyword lines, the review
+
+(ert-deftest orsb-tools-a-type-can-supply-defaults-and-keywords ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (should (equal (alist-get 'enforce (orsb-tools-test--data "get_schema")) "strict"))
+    (let* ((made (orsb-tools-test--data "create_node" 'title "Racking Feynman!" 'node_type "post" 'tags ["homelab"]))
+           (text (orsb-test--file (alist-get 'file made))))
+      (should (string-prefix-p "projects/posts/" (alist-get 'file made)))
+      (should (equal (alist-get 'node_type made) "post"))
+      (should (equal (alist-get 'status made) "draft"))
+      (should (string-match-p "^:EXPORT_FILE_NAME: racking-feynman$" text))
+      (should (string-match-p "^#\\+date: \\[[0-9-]+\\]\n#\\+hugo_draft: true$" text))
+      (should (string-match-p "^\\* Draft$" text))
+      (should-not (string-match-p "Current state" text))
+      ;; its own lifecycle, not the project's
+      (orsb-tools-test--data "set_node" 'id (alist-get 'id made) 'status "published")
+      (should (string-match-p "not one of"
+                              (alist-get 'message (orsb-tools-test--error "set_node" 'id (alist-get 'id made) 'status "active")))))))
+
+(ert-deftest orsb-tools-review-lists-unfinished-notes-of-any-lifecycle-type ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let ((post (alist-get 'id (orsb-tools-test--data "create_node" 'title "A post" 'node_type "post")))
+          (plan (alist-get 'id (orsb-tools-test--data "create_node" 'title "A plan" 'node_type "project"
+                                                      'status "active" 'next_action "Start"))))
+      (cl-flet ((open-titles () (mapcar (lambda (r) (alist-get 'title r))
+                                        (alist-get 'items (alist-get 'open (orsb-tools-test--data "get_review" 'limit 50))))))
+        (should (member "A post" (open-titles)))
+        (should (member "A plan" (open-titles)))
+        ;; a telos note has no lifecycle: never in the list
+        (should-not (member "Mission" (open-titles)))
+        (orsb-tools-test--data "set_node" 'id post 'status "published")
+        (orsb-tools-test--data "set_node" 'id plan 'status "done")
+        (should-not (member "A post" (open-titles)))
+        (should-not (member "A plan" (open-titles))))
+      (let ((review (orsb-tools-test--data "get_review")))
+        (dolist (gone '(active_projects stale_projects followups))
+          (should-not (assq gone review)))))
+    ;; a heading promoted to a note lands in its type's folder
+    (let* ((plan (alist-get 'id (orsb-tools-test--data "create_node" 'title "Host plan" 'node_type "project"
+                                                       'status "active" 'next_action "x")))
+           (logged (alist-get 'id (orsb-tools-test--data "create_node" 'parent_id plan 'section "Log" 'title "Entry"
+                                                         'body "Happened.")))
+           (h (alist-get 'id (orsb-tools-test--data "create_node" 'parent_id plan 'title "Spin-off" 'body "Its own thing."))))
+      ;; taking an entry out of an append-only section is an edit of that section
+      (should (string-match-p "append-only"
+                              (alist-get 'message (orsb-tools-test--error "move_node" 'id logged 'to_note t 'node_type "post"))))
+      ;; a section the schema does not rule is free to leave
+      (let ((moved (orsb-tools-test--data "move_node" 'id h 'to_note t 'node_type "post" 'leave_link :json-false)))
+        (should (string-prefix-p "projects/posts/" (alist-get 'file moved)))))))
 
 ;;;; proposals
 

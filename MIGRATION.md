@@ -1,5 +1,48 @@
 # Migrating to the current MCP contract
 
+## 2.2 → 3.0: the vault defines its own note types
+
+3.0 is a breaking release. Nothing is kept for compatibility.
+
+- **No built-in note types.** `orsb-directories` (and the alias
+  `orsb-node-types`) are gone. A type is a folder with a `_schema.org` that
+  sets `TYPE`; see the README. A vault without schema files has one type,
+  `note`, created in the vault's top folder. To keep the 2.x layout, give
+  each of your folders (`projects/`, `people/`, ...) a `_schema.org`.
+- **`NODE-TYPE` is not read or written.** A note's type is where it lives.
+  `node_type` in answers and in filters is the type of the note's folder.
+- **Statuses come from the schema.** `orsb-status-values`,
+  `orsb-blog-status-values`, `orsb-status-aliases` and `M-x
+  orsb-migrate-status` are gone. A type names its lifecycle property and
+  values (`LIFECYCLE`, `LIFECYCLE_VALUES`, `LIFECYCLE_FINISHED`). Old
+  spellings are no longer mapped; a value is written as given and, with
+  schema files, checked.
+- **`create_node`** takes `title`, `node_type`, `status`, `properties`,
+  `tags`, `body`. The arguments `next_action`, `due_date`, `one_liner`,
+  `context`, `follow_ups` and `hugo_section` are gone: pass properties in
+  `properties`. Skeleton headings, default properties and keyword lines come
+  from the type's schema (`Template`, the `default` column, `Keywords`).
+- **Blog support moved out of the core.** `orsb-hugo-base-dir` and
+  `orsb-hugo-sections` are gone from the server; a blog type's schema supplies
+  the export properties and `#+hugo_*` lines. The Emacs blog commands keep
+  their own `sb/hugo-base-dir` and `sb/hugo-sections`.
+- **People are not special.** `log_to_inbox` no longer creates a note for a
+  `[[Name]]`, and its answer has no `created_people`. `get_review` has no
+  `followups` and no `dangling_name_links`. `get_tasks` takes `mentions`
+  where it took `person`.
+- **`get_review`** returns `open` and `stale` (unfinished notes of every type
+  that declares a lifecycle) where it returned `active_projects` and
+  `stale_projects`. Without schema files both are empty.
+- **`get_schema`** no longer returns `node_types`, `status_values`,
+  `blog_status_values`, `status_aliases`, `property_keys`, `hugo_sections` or
+  `blog_enabled`. It returns `types`, `schema_files` and `enforce`.
+- **New tools:** `check_schema`, `get_proposals`, `decide_proposal`; every
+  write tool takes `propose` and `reason`. Twenty-two tools in all.
+- **`orsb-agenda-directories`** is a list of vault folders, not of types, and
+  is empty by default.
+- **`orsb-core-create-node`** is `(TITLE &rest ARGS)` with `:dir`, `:drawer`,
+  `:keywords`, `:tags`, `:body`; `orsb-core-promote-node` takes a folder.
+
 ## 2.1 → 2.2: one tool set
 
 2.2 removes everything that offered a second set of tools:

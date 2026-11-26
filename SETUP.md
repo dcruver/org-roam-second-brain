@@ -18,8 +18,7 @@ Doom:
 (use-package! org-roam-second-brain
   :after org-roam
   :config
-  (orsb-mode 1)
-  (setq orsb-hugo-base-dir "~/Projects/my-site/"))   ; only if you blog with ox-hugo
+  (orsb-mode 1))
 ```
 
 Vanilla Emacs with straight.el:
@@ -38,22 +37,24 @@ search). Nothing is bound until the mode is on.
 
 ## 3. Vault layout
 
-The package expects typed notes in subdirectories (`orsb-directories`):
-`projects/`, `people/`, `ideas/`, `admin/`, `blog/`, `reference/`, `howto/`,
-plus `daily/` and `archive/`. A typed note starts with a file-level drawer:
+The package uses two folders of its own, `daily/` and `archive/`
+(`orsb-daily-directory`, `orsb-archive-directory`). Everything else about the
+layout is yours: a folder is a note type when it holds a `_schema.org` that
+sets `TYPE`. Start with one file at the top of the vault and add a folder per
+type as you need them; the README's "Note types" section has the format.
+With no `_schema.org` at all, every note is a `note` and nothing is checked.
+
+A note needs only an id and a title:
 
 ```org
 :PROPERTIES:
 :ID:       0d5a4e0c-...
-:NODE-TYPE: project
 :STATUS:   active
-:NEXT-ACTION: Order the parts
 :END:
 #+title: Rebuild the shed
 ```
 
-`M-x orsb-migrate-status` reports (and with a prefix argument rewrites)
-status spellings from older conventions.
+Its type is the folder it sits in; there is no type property.
 
 ## 4. Semantic search (optional)
 
