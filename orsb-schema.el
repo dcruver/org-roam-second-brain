@@ -31,7 +31,8 @@
 ;;   * Template    the body a new note of this type starts with
 ;;
 ;; Defaults, keyword values and the template may use %DATE%, %TITLE% and
-;; %SLUG%, filled in when a note is created.  %BODY% in the template is
+;; %SLUG%, filled in when a note is created; a keyword value may also use
+;; %TAGS% (the note's tags, space separated).  %BODY% in the template is
 ;; where the text given at creation goes.
 ;;
 ;; The file has no org-roam :ID:, so it is not a note.
@@ -606,11 +607,16 @@ gets the date of TIME (now by default)."
   "TITLE as a lowercase, hyphenated file-name stem."
   (string-trim (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase (or title ""))) "-+" "-+"))
 
-(defun orsb-schema-fill (text title &optional time)
-  "Return TEXT with %DATE%, %TITLE% and %SLUG% filled in for a note TITLE."
+(defun orsb-schema-fill (text title &optional time extra)
+  "Return TEXT with %DATE%, %TITLE% and %SLUG% filled in for a note TITLE.
+EXTRA is an alist of further (NAME . value) pairs: (\"TAGS\" . \"a b\")
+fills %TAGS%."
   (let* ((text (replace-regexp-in-string "%DATE%" (format-time-string "%Y-%m-%d" time) (or text "") t t))
-         (text (replace-regexp-in-string "%TITLE%" (or title "") text t t)))
-    (replace-regexp-in-string "%SLUG%" (orsb-schema--slug title) text t t)))
+         (text (replace-regexp-in-string "%TITLE%" (or title "") text t t))
+         (text (replace-regexp-in-string "%SLUG%" (orsb-schema--slug title) text t t)))
+    (dolist (cell extra)
+      (setq text (replace-regexp-in-string (concat "%" (regexp-quote (car cell)) "%") (or (cdr cell) "") text t t)))
+    text))
 
 (defun orsb-schema-default-properties (schema title &optional time)
   "Return the properties SCHEMA gives a new note titled TITLE by default.
@@ -622,10 +628,14 @@ An alist from the fourth column of the Properties table."
           (push (cons (upcase (car row)) (orsb-schema-fill default title time)) out))))
     (nreverse out)))
 
-(defun orsb-schema-new-keywords (schema title &optional time)
-  "Return the #+KEYWORD lines SCHEMA gives a new note titled TITLE, as an alist."
-  (mapcar (lambda (row) (cons (car row) (orsb-schema-fill (or (nth 1 row) "") title time)))
-          (seq-remove (lambda (row) (string-empty-p (or (nth 1 row) ""))) (alist-get 'keywords schema))))
+(defun orsb-schema-new-keywords (schema title &optional time tags)
+  "Return the #+KEYWORD lines SCHEMA gives a new note titled TITLE, as an alist.
+%TAGS% in a value is the note's TAGS (a list) joined by spaces.  A line whose
+value comes out empty is left out."
+  (let ((extra (list (cons "TAGS" (string-join tags " ")))))
+    (seq-remove (lambda (cell) (string-blank-p (cdr cell)))
+                (mapcar (lambda (row) (cons (car row) (string-trim (orsb-schema-fill (or (nth 1 row) "") title time extra))))
+                        (alist-get 'keywords schema)))))
 
 (defun orsb-schema-finished-p (schema value)
   "Non-nil when VALUE of SCHEMA's lifecycle property means the note is closed."

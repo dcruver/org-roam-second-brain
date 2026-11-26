@@ -73,7 +73,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.0.0-rc1")
+(defconst orsb-tools-version "3.0.0-rc2")
 
 ;;;; Argument helpers
 
@@ -647,7 +647,8 @@ checks titles and aliases only."
       (seq-uniq (delq nil (append exact similar)) (lambda (a b) (equal (alist-get 'id a) (alist-get 'id b)))))))
 
 (defconst orsb-tools--create-reserved
-  '(title node_type parent_id on_duplicate body status tags properties dry_run section todo scheduled deadline)
+  '(title node_type parent_id on_duplicate body status tags properties keywords dry_run propose reason
+    section todo scheduled deadline)
   "Arguments of create_node that are not a note property.")
 
 (defun orsb-tools--create-by-schema (args type title)
@@ -683,7 +684,11 @@ NEXT-ACTION) sets that property."
                     ;; schema order first, then whatever else was given
                     :drawer (append (seq-filter #'identity (mapcar (lambda (k) (assoc k props)) known))
                                     (seq-remove (lambda (c) (member (car c) known)) (reverse props)))
-                    :keywords (orsb-schema-new-keywords schema title)
+                    ;; the type's keyword lines, then the caller's, which win
+                    :keywords (let ((given (orsb-arg-props args 'keywords)))
+                                (append (seq-remove (lambda (c) (assoc-string (car c) given t))
+                                                    (orsb-schema-new-keywords schema title nil (orsb-arg-list args 'tags)))
+                                        (mapcar (lambda (c) (cons (car c) (format "%s" (cdr c)))) given)))
                     :tags (orsb-arg-list args 'tags)
                     :body (orsb-schema-new-body schema title (orsb-arg args 'body)))))
          (append '((created . t)) (orsb-tools--full-record node nil)))))))
@@ -1466,6 +1471,8 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (tags . ,orsb-tools--string-list)
       (properties . ((type . "object") (additionalProperties . ((type . "string")))
                      (description . "The note's properties; get_schema with type lists the ones its type requires")))
+      (keywords . ((type . "object") (additionalProperties . ((type . "string")))
+                   (description . "Extra #+KEYWORD lines for the new note, beside the ones its type supplies")))
       (on_duplicate . ((type . "string") (enum . ("ask" "use_existing" "create")) (default . "ask")))
       ,orsb-tools--dry-run-schema))
     ("set_node" orsb-tool-set-node

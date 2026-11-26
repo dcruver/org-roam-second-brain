@@ -306,7 +306,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
                             "| EXPORT_FILE_NAME | yes | text | %SLUG% |\n\n"
                             "* Sections\n| section | required | rule |\n|-\n"
                             "| Current state | remove | |\n| Log | remove | |\n| Design | remove | |\n\n"
-                            "* Keywords\n| keyword | value |\n|-\n| date | [%DATE%] |\n| hugo_draft | true |\n\n"
+                            "* Keywords\n| keyword | value |\n|-\n| date | [%DATE%] |\n| hugo_draft | true |\n| hugo_tags | %TAGS% |\n\n"
                             "* Template\n** Draft\n"))
   (orsb-test--write "telos/_schema.org"
                     "* Type\n:PROPERTIES:\n:TYPE: telos\n:NOTES_HERE: yes\n:WRITE: propose\n:NEVER: move merge delete\n:ENFORCE: strict\n:END:\n")
@@ -412,8 +412,18 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'status made) "draft"))
       (should (string-match-p "^:EXPORT_FILE_NAME: racking-feynman$" text))
       (should (string-match-p "^#\\+date: \\[[0-9-]+\\]\n#\\+hugo_draft: true$" text))
+      ;; the note's tags fill %TAGS%
+      (should (string-match-p "^#\\+hugo_tags: homelab$" text))
       (should (string-match-p "^\\* Draft$" text))
       (should-not (string-match-p "Current state" text))
+      ;; keyword lines given at creation join the type's, and win over them; a line with nothing to say is left out
+      (let ((text2 (orsb-test--file (alist-get 'file (orsb-tools-test--data
+                                                      "create_node" 'title "Second post" 'node_type "post"
+                                                      'keywords '((hugo_categories . "Homelab") (hugo_draft . "false")))))))
+        (should (string-match-p "^#\\+hugo_categories: Homelab$" text2))
+        (should (string-match-p "^#\\+hugo_draft: false$" text2))
+        (should-not (string-match-p "hugo_draft: true" text2))
+        (should-not (string-match-p "hugo_tags" text2)))
       ;; its own lifecycle, not the project's
       (orsb-tools-test--data "set_node" 'id (alist-get 'id made) 'status "published")
       (should (string-match-p "not one of"

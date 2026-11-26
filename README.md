@@ -113,7 +113,8 @@ As of %DATE%.
   holding the list), `date`, `URL`, `four digits`, `link` and `link to a note
   of type T`. Anything else is a description.
 - `date, set by the server` is filled in on creation. Defaults, keyword
-  values and the template may use `%DATE%`, `%TITLE%` and `%SLUG%`. `%BODY%` in
+  values and the template may use `%DATE%`, `%TITLE%` and `%SLUG%`. A keyword value may also use `%TAGS%`
+  (the note's tags, space separated). `%BODY%` in
   the template is where the text given at creation goes (before the first
   heading when the template does not say).
 - Section rules: `replace` (rewritten whole), `append` (only grows),
