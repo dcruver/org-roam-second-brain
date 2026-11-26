@@ -1,7 +1,7 @@
 ;;; orsb-schema.el --- Note types and their rules, read from the vault -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.2
+;; Version: 3.1.3
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain

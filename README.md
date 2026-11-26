@@ -188,7 +188,7 @@ error says what to do next.
 | `set_checkbox` | tick or untick one checklist item, by its text or index |
 | `get_tasks` | open TODO headings and checkboxes across the vault, dated first; filter by state, note, mentions, due date, text |
 | `link_nodes` | add (idempotent) or remove a link; `both_ways`; removing a link inside a sentence keeps the words |
-| `move_node` | refile a heading under another note or heading, or make it a note of its own; links keep working |
+| `move_node` | refile a heading under another note or heading, or make it a note of its own; links keep working; with `folder`, move a whole note to another folder (and so to another type) |
 | `merge_nodes` | fold one note into another as a section; links to it keep working |
 | `delete_node` | delete a heading, or archive (default) / delete a note; returns the notes that linked to it |
 | `add_daily_entry` | a structured entry in today's (or a given day's) daily note |

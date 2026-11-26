@@ -1,7 +1,7 @@
 ;;; orsb-tools.el --- The 2.0 MCP tool contract -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.2
+;; Version: 3.1.3
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -73,7 +73,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.1.2")
+(defconst orsb-tools-version "3.1.3")
 
 ;;;; Argument helpers
 
@@ -992,9 +992,43 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
   (orsb-require args 'id)
   (let* ((node (orsb-core-resolve (orsb-arg args 'id)))
          (to-note (orsb-arg-bool args 'to_note))
-         (target (when-let ((tg (orsb-arg args 'target_id))) (orsb-core-resolve tg))))
+         (target (when-let ((tg (orsb-arg args 'target_id))) (orsb-core-resolve tg)))
+         (folder (orsb-arg args 'folder)))
+    (if folder
+        (orsb-tools--move-to-folder args node folder)
+      (orsb-tools--move-heading args node to-note target))))
+
+(defun orsb-tools--move-to-folder (args node folder)
+  "Move the whole note NODE into FOLDER of the vault, for ARGS.
+The folder a note is in is its type, so this is also how a note changes type."
+  (unless (= (org-roam-node-level node) 0)
+    (orsb-error-hint 'invalid-argument "Give the note's own id, or use to_note:true to make the heading a note first."
+                     "Only a whole note moves to a folder; %s is a heading" (org-roam-node-title node)))
+  (let* ((root (file-name-as-directory (expand-file-name org-roam-directory)))
+         (from (expand-file-name (org-roam-node-file node)))
+         (dir (file-name-as-directory (expand-file-name folder root)))
+         (to (expand-file-name (file-name-nondirectory from) dir)))
+    (unless (and (file-in-directory-p dir root) (file-directory-p dir))
+      (orsb-error-hint 'not-found "get_schema lists the types and the folder of each." "No folder %s in the vault" folder))
+    (when (file-equal-p (file-name-directory from) dir)
+      (orsb-error 'invalid-argument "%s is already in %s" (org-roam-node-title node) folder))
+    (when (file-exists-p to)
+      (orsb-error 'refused "%s already holds a file named %s" folder (file-name-nondirectory from)))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard (orsb-schema-operation-problems from "move")))
+    (orsb-tools--change
+     args "move_node" (format "move %s to %s" (org-roam-node-title node) folder)
+     (lambda ()
+       (orsb-core--fs-rename from to)
+       `((id . ,(org-roam-node-id node)) (title . ,(org-roam-node-title node)) (action . "moved")
+         (file . ,(file-relative-name to root))
+         (node_type . ,(or (orsb-schema-get (orsb-schema-for-file to root) "TYPE") "note")))))))
+
+(defun orsb-tools--move-heading (args node to-note target)
+  "Refile heading NODE under TARGET, or with TO-NOTE make it a note, for ARGS."
+  (progn
     (unless (or to-note target)
-      (orsb-error 'invalid-argument "give target_id (where it goes) or to_note:true (make it a note of its own)"))
+      (orsb-error 'invalid-argument "give target_id (where it goes), to_note:true (make it a note of its own) or folder (move the whole note)"))
     (when (orsb-tools--schema-on-p)
       (orsb-tools--guard
        (append (if (= (org-roam-node-level node) 0)
@@ -1607,12 +1641,13 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (both_ways . ((type . "boolean") (default . :json-false)))
       ,orsb-tools--dry-run-schema))
     ("move_node" orsb-tool-move-node
-     "Move a heading (with everything under it) into another note or heading, or with to_note=true make it a note of its own. Links to it keep working."
+     "Move a heading (with everything under it) into another note or heading, or with to_note=true make it a note of its own. With folder: move a whole note into that folder of the vault, which also makes it a note of that folder's type. Links keep working."
      ("id")
      (,orsb-tools--id-schema
       (target_id . ((type . "string") (description . "Note or heading to move it under")))
       (section . ((type . "string") (description . "Heading inside the target to move it under")))
       (to_note . ((type . "boolean") (default . :json-false)))
+      (folder . ((type . "string") (description . "Move the whole note into this folder of the vault, e.g. reference/tech")))
       (node_type . ((type . "string") (description . "With to_note: type of the new note")))
       (leave_link . ((type . "boolean") (default . t) (description . "With to_note: leave a link where it was")))
       ,orsb-tools--dry-run-schema))

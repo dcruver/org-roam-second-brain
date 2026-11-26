@@ -582,6 +582,33 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
         (should (string-match-p ":ID: <uuid>" (orsb-test--file hidden))))
       (should-not (alist-get 'duplicate-id (alist-get 'by_rule (orsb-tools-test--data "check_schema")))))))
 
+(ert-deftest orsb-tools-a-note-moves-to-another-folder ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "warn")
+    (make-directory (expand-file-name "projects/sub" org-roam-directory) t)
+    (with-temp-file (expand-file-name "loose.org" org-roam-directory)
+      (insert ":PROPERTIES:\n:ID: loose-1\n:END:\n#+title: Loose\n\n* Part\n:PROPERTIES:\n:ID: loose-part\n:END:\nText.\n"))
+    (org-roam-db-sync)
+    (should (equal (alist-get 'code (orsb-tools-test--error "move_node" 'id "loose-1" 'folder "nowhere")) "not_found"))
+    (should (equal (alist-get 'code (orsb-tools-test--error "move_node" 'id "loose-part" 'folder "projects")) "invalid_argument"))
+    (let ((preview (orsb-tools-test--data "move_node" 'id "loose-1" 'folder "projects/sub" 'dry_run t)))
+      (should (eq (alist-get 'dry_run preview) t))
+      (should (file-exists-p (expand-file-name "loose.org" org-roam-directory))))
+    (let ((done (orsb-tools-test--data "move_node" 'id "loose-1" 'folder "projects/sub")))
+      (should (equal (alist-get 'file done) "projects/sub/loose.org"))
+      (should (equal (alist-get 'node_type done) "project"))
+      (should-not (file-exists-p (expand-file-name "loose.org" org-roam-directory)))
+      ;; found by the same id, at its new place and as its new type
+      (let ((n (orsb-tools-test--data "get_node" 'id "loose-1")))
+        (should (equal (alist-get 'file n) "projects/sub/loose.org"))
+        (should (equal (alist-get 'node_type n) "project")))
+      (should (equal (alist-get 'file (orsb-tools-test--data "get_node" 'id "loose-part")) "projects/sub/loose.org"))
+      (should (equal (alist-get 'code (orsb-tools-test--error "move_node" 'id "loose-1" 'folder "projects/sub")) "invalid_argument"))
+      (orsb-tools-test--data "restore" 'change_id (alist-get 'change_id done))
+      (should (file-exists-p (expand-file-name "loose.org" org-roam-directory))))
+    ;; a type that is never moved stays where it is
+    (should (equal (alist-get 'code (orsb-tools-test--error "move_node" 'id "telos-mission" 'folder "projects")) "schema_violation"))))
+
 (ert-deftest orsb-tools-a-proposal-goes-stale-or-is-rejected ()
   (orsb-test-with-vault
     (orsb-tools-test--schema-vault "strict")
