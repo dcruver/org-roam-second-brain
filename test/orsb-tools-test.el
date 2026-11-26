@@ -56,12 +56,12 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       ;; nothing of any particular vault is built in
       (dolist (gone '(node_types status_values blog_status_values status_aliases property_keys hugo_sections blog_enabled))
         (should-not (assq gone schema))))
-    ;; exactly these twenty-two: no old names, no profiles
+    ;; exactly these twenty-three: no old names, no profiles
     (orsb-tools-test--ensure-registered)
     (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
                    "set_checkbox" "get_tasks" "link_nodes" "move_node" "merge_nodes" "delete_node"
                    "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema"
-                   "check_schema" "get_proposals" "decide_proposal")))
+                   "check_schema" "get_proposals" "decide_proposal" "reassign_id")))
       (dolist (name names) (should (gethash name org-roam-mcp-http--tools)))
       (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
     (dolist (gone '("read_note" "read_node" "semantic_search" "create_blog_post" "blog_status" "update_node"
@@ -500,6 +500,64 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
                                                               'content "And to teach." 'propose t))))
       (orsb-tools-test--data "decide_proposal" 'id pid 'decision "approve")
       (should (string-match-p "And to teach\\." (orsb-test--file "telos/mission.org"))))))
+
+;;;; batches of proposals, and the note hidden behind a shared id
+
+(ert-deftest orsb-tools-a-batch-is-decided-together ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let* ((mk (lambda (title) (alist-get 'id (orsb-tools-test--data "create_node" 'title title 'node_type "project"
+                                                                     'status "active" 'next_action "Go"))))
+           (a (funcall mk "Alpha")) (b (funcall mk "Beta")) (c (funcall mk "Gamma"))
+           (file (lambda (id) (alist-get 'file (orsb-tools-test--data "get_node" 'id id)))))
+      (dolist (id (list a b))
+        (orsb-tools-test--data "update_body" 'id id 'section "Design" 'content "Batched line." 'propose t 'batch "cleanup-1"))
+      (orsb-tools-test--data "update_body" 'id c 'section "Design" 'content "Alone." 'propose t)
+      (let ((listed (orsb-tools-test--data "get_proposals" 'batch "cleanup-1")))
+        (should (= (alist-get 'total listed) 2))
+        (should (equal (alist-get 'batch (car (alist-get 'proposals listed))) "cleanup-1")))
+      ;; one of the two notes moves on: the batch still decides the other and names the refusal
+      (orsb-tools-test--data "update_body" 'id b 'section "Log" 'content "- moved on")
+      (let ((r (orsb-tools-test--data "decide_proposal" 'batch "cleanup-1" 'decision "approve")))
+        (should (= (alist-get 'decided r) 1))
+        (should (equal (alist-get 'code (car (alist-get 'refused r))) "conflict")))
+      (should (string-match-p "Batched line" (orsb-test--file (funcall file a))))
+      (should-not (string-match-p "Batched line" (orsb-test--file (funcall file b))))
+      (let ((r (orsb-tools-test--data "decide_proposal" 'batch "cleanup-1" 'decision "approve" 'force t)))
+        (should (= (alist-get 'decided r) 1)))
+      (should (string-match-p "Batched line" (orsb-test--file (funcall file b))))
+      ;; the proposal outside the batch is untouched
+      (should (= (alist-get 'total (orsb-tools-test--data "get_proposals")) 1))
+      (should-not (string-match-p "Alone" (orsb-test--file (funcall file c))))
+      (should (equal (alist-get 'code (orsb-tools-test--error "decide_proposal" 'batch "cleanup-1" 'decision "approve")) "not_found"))
+      (should (equal (alist-get 'code (orsb-tools-test--error "decide_proposal" 'decision "approve")) "invalid_argument")))))
+
+(ert-deftest orsb-tools-a-hidden-note-gets-its-own-id ()
+  (orsb-test-with-vault
+    (dolist (n '("one" "two"))
+      (with-temp-file (expand-file-name (concat "shared-" n ".org") org-roam-directory)
+        (insert ":PROPERTIES:\n:ID: 1700000000\n:END:\n#+title: Shared " n "\n\n* Part\n:PROPERTIES:\n:ID: part-" n "\n:END:\nText.\n")))
+    (org-roam-db-sync)
+    (let* ((seen (file-name-nondirectory (org-roam-node-file (org-roam-node-from-id "1700000000"))))
+           (hidden (if (equal seen "shared-one.org") "shared-two.org" "shared-one.org")))
+      (should (= 2 (alist-get 'duplicate-id (alist-get 'by_rule (orsb-tools-test--data "check_schema")))))
+      ;; the copy links point at keeps its id
+      (should (equal (alist-get 'code (orsb-tools-test--error "reassign_id" 'file seen)) "refused"))
+      (let ((preview (orsb-tools-test--data "reassign_id" 'file hidden 'dry_run t)))
+        (should (eq (alist-get 'dry_run preview) t))
+        (should (string-match-p ":ID: 1700000000" (orsb-test--file hidden))))
+      (let* ((done (orsb-tools-test--data "reassign_id" 'file hidden))
+             (new (alist-get 'new_id done)))
+        (should (equal (alist-get 'old_id done) "1700000000"))
+        (should (string-match-p (concat ":ID: " (regexp-quote new)) (orsb-test--file hidden)))
+        ;; only the note's own id changed, and both notes are now in the index
+        (should (string-match-p ":ID: part-" (orsb-test--file hidden)))
+        (should (equal (file-name-nondirectory (org-roam-node-file (org-roam-node-from-id new))) hidden))
+        (should (equal (file-name-nondirectory (org-roam-node-file (org-roam-node-from-id "1700000000"))) seen))
+        (should-not (alist-get 'duplicate-id (alist-get 'by_rule (orsb-tools-test--data "check_schema"))))
+        (should (equal (alist-get 'code (orsb-tools-test--error "reassign_id" 'file hidden)) "refused"))
+        (orsb-tools-test--data "restore" 'change_id (alist-get 'change_id done))
+        (should (string-match-p ":ID: 1700000000" (orsb-test--file hidden)))))))
 
 (ert-deftest orsb-tools-a-proposal-goes-stale-or-is-rejected ()
   (orsb-test-with-vault

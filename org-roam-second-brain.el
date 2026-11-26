@@ -327,6 +327,7 @@ Returns plist with :concepts and :dailies lists, each containing
     (define-key map (kbd "q") 'quit-window)
     (define-key map (kbd "i") 'sb/buffer-insert-link)
     (define-key map (kbd "a") 'sb/proposal-approve)
+    (define-key map (kbd "B") 'sb/proposal-approve-batch)
     (define-key map (kbd "r") 'sb/proposal-reject)
     (define-key map (kbd "x") 'sb/buffer-dismiss-item)
     map)
@@ -351,6 +352,7 @@ Returns plist with :concepts and :dailies lists, each containing
     (kbd "q") 'quit-window
     (kbd "yi") 'sb/buffer-insert-link
     (kbd "a") 'sb/proposal-approve
+    (kbd "B") 'sb/proposal-approve-batch
     (kbd "r") 'sb/proposal-reject))
 
 (defvar-local sb/buffer-items nil
@@ -690,15 +692,16 @@ RET shows what one would change, a approves it, r rejects it."
                  (unless items (insert "  Nothing is waiting.\n"))
                  (dolist (p items)
                    (sb/--insert-item
-                    (format "  %s  %-12s %s%s%s"
+                    (format "  %s  %-12s %s%s%s%s"
                             (alist-get 'id p) (alist-get 'tool p)
                             (string-join (append (alist-get 'files p) nil) ", ")
+                            (if (stringp (alist-get 'batch p)) (format "  {%s}" (alist-get 'batch p)) "")
                             (if (eq (alist-get 'stale p) t) "  [note changed since]" "")
                             (let ((why (alist-get 'reason p)))
                               (if (stringp why) (format "\n      %s" why) "")))
-                    (list :proposal (alist-get 'id p))
+                    (list :proposal (alist-get 'id p) :batch (alist-get 'batch p))
                     0))
-                 (insert "\n  RET preview, a approve, r reject\n")))))
+                 (insert "\n  RET preview, a approve, r reject, B approve the whole {batch} of the one at point\n")))))
 
 (defun sb/proposal-show (id)
   "Show what proposal ID would change, line by line."
@@ -732,6 +735,25 @@ RET shows what one would change, a approves it, r rejects it."
            (user-error "%s" (nth 2 err)))))
       (message "Applied %s" id)
       (sb/proposals))))
+
+(defun sb/proposal-approve-batch ()
+  "Approve every pending proposal filed under the batch of the one at point."
+  (interactive)
+  (let* ((item (or (get-text-property (point) 'sb-item) (get-text-property (line-beginning-position) 'sb-item)))
+         (batch (plist-get item :batch)))
+    (unless (stringp batch) (user-error "The proposal on this line is not part of a batch"))
+    (let* ((n (alist-get 'total (sb/--proposals "get_proposals" #'orsb-tool-get-proposals `((batch . ,batch) (limit . 1)))))
+           (run (lambda (force)
+                  (sb/--proposals "decide_proposal" #'orsb-tool-decide-proposal
+                                  `((batch . ,batch) (decision . "approve") ,@(when force '((force . t))))))))
+      (when (y-or-n-p (format "Apply all %s proposals of batch %s? " n batch))
+        (let* ((r (funcall run nil))
+               (refused (append (alist-get 'refused r) nil)))
+          (when (and refused (y-or-n-p (format "%d applied, %d refused (first: %s).  Apply those to the notes as they are now? "
+                                               (alist-get 'decided r) (length refused) (alist-get 'message (car refused)))))
+            (setq r (funcall run t)))
+          (message "Batch %s: %s applied, %d refused" batch (alist-get 'decided r) (length (append (alist-get 'refused r) nil))))
+        (sb/proposals)))))
 
 (defun sb/proposal-reject (note)
   "Reject the proposal at point, keeping NOTE as the reason."

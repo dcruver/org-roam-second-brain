@@ -84,6 +84,27 @@
       (should (string-match-p "Nothing is waiting" (orsb-commands-test--text "*Second Brain: proposals*"))))))
 
 
+(ert-deftest orsb-commands-a-batch-is-approved-from-the-buffer ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let ((ids (mapcar (lambda (title)
+                         (alist-get 'id (orsb-tools-test--data "create_node" 'title title 'node_type "project"
+                                                               'status "active" 'next_action "Go")))
+                       '("Shelf" "Bench"))))
+      (dolist (id ids)
+        (orsb-tools-test--data "update_body" 'id id 'section "Design" 'content "Oak." 'propose t 'batch "wood"))
+      (orsb-commands-test--answering '()
+        (sb/proposals)
+        (with-current-buffer "*Second Brain: proposals*"
+          (should (string-match-p "{wood}" (buffer-string)))
+          (goto-char (point-min))
+          (sb/buffer-next-item)
+          (sb/proposal-approve-batch)))
+      (dolist (id ids)
+        (should (string-match-p "Oak\\." (orsb-test--file (file-relative-name (org-roam-node-file (orsb-core-resolve id))
+                                                                                org-roam-directory)))))
+      (should (string-match-p "Nothing is waiting" (orsb-commands-test--text "*Second Brain: proposals*"))))))
+
 (ert-deftest orsb-commands-proposals-on-a-server ()
   "With `orsb-server-url' set, proposals are read from and decided on that server."
   (let ((orsb-server-url "http://notes.example:8007/mcp") sent)

@@ -1195,6 +1195,46 @@ write the keyword :json-null as the string \"json-null\"."
       (offset . ,offset)
       (violations . ,(orsb--vector (seq-take (seq-drop all offset) limit))))))
 
+(defun orsb-tools--file-id (file)
+  "The file-level :ID: of FILE (the one before its first heading), or nil."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((end (save-excursion (if (re-search-forward "^\\*+ " nil t) (line-beginning-position) (point-max)))))
+      (when (re-search-forward "^[ \t]*:ID:[ \t]+\\(\\S-+\\)" end t)
+        (match-string 1)))))
+
+(defun orsb-tool-reassign-id (args)
+  "reassign_id: give a note that shares its id with another note an id of its own."
+  (orsb-require args 'file)
+  (let* ((rel (orsb-arg args 'file))
+         (root (expand-file-name org-roam-directory))
+         (file (orsb-core--vault-file rel)))
+    (unless (and (string-suffix-p ".org" file) (file-in-directory-p file root) (file-regular-p file))
+      (orsb-error-hint 'not-found "check_schema with rule duplicate-id lists the files." "No note at %s" rel))
+    (let* ((id (or (orsb-tools--file-id file) (orsb-error 'refused "%s has no id of its own" rel)))
+           (others (seq-filter (lambda (f) (and (not (file-equal-p f file)) (equal (orsb-tools--file-id f) id)))
+                               (orsb-schema--note-files root)))
+           (indexed (ignore-errors (org-roam-node-file (org-roam-node-from-id id)))))
+      (unless others
+        (orsb-error 'refused "No other note has the id %s, so %s keeps it" id rel))
+      (when (and indexed (file-equal-p indexed file) (not (orsb-arg-bool args 'force)))
+        (orsb-error-hint 'refused
+                         "Links and search use this copy. Reassign the other note instead, or pass force:true to move the id away from this one."
+                         "%s is the note the index holds under %s; the hidden one is %s"
+                         rel id (mapconcat (lambda (f) (file-relative-name f root)) others ", ")))
+      (orsb-tools--change
+       args "reassign_id" (format "new id for %s" rel)
+       (lambda ()
+         (let ((new (org-id-uuid)))
+           (with-current-buffer (find-file-noselect file)
+             (save-excursion
+               (goto-char (point-min))
+               (re-search-forward "^[ \t]*:ID:[ \t]+\\(\\S-+\\)")
+               (replace-match new t t nil 1)))
+           (orsb-core--after-write file)
+           `((file . ,rel) (old_id . ,id) (new_id . ,new)
+             (shared_with . ,(orsb--vector (mapcar (lambda (f) (file-relative-name f root)) others))))))))))
+
 (defun orsb-tool-get-schema (args)
   "get_schema: the vocabulary this server enforces, or with type one type's rules."
   (if-let* ((type (orsb-arg args 'type)))
@@ -1290,6 +1330,7 @@ write the keyword :json-null as the string \"json-null\"."
       (status . ,(alist-get 'status proposal))
       (tool . ,(alist-get 'tool proposal))
       (reason . ,(alist-get 'reason proposal))
+      ,@(when-let* ((b (alist-get 'batch proposal))) `((batch . ,b)))
       (created . ,(alist-get 'created proposal))
       (files . ,(orsb--vector (mapcar (lambda (f) (alist-get 'file f)) (append (alist-get 'files proposal) nil))))
       ,@(when pending `((stale . ,(if stale t :json-false)))))))
@@ -1300,7 +1341,7 @@ The call is run as a dry run with the \"needs approval\" rules lifted, so
 its preview is exactly what approving it would do."
   (unless (seq-find (lambda (def) (and (equal (car def) tool) (assq 'dry_run (nth 4 def)))) orsb-tools--definitions)
     (orsb-error 'invalid-argument "%s changes nothing, so there is nothing to propose" tool))
-  (let* ((call (seq-remove (lambda (c) (memq (car c) '(propose reason dry_run))) args))
+  (let* ((call (seq-remove (lambda (c) (memq (car c) '(propose reason batch dry_run))) args))
          (orsb-schema-approved t)
          (data (funcall fn (append call '((dry_run . t)))))
          (preview (append (alist-get 'would_change data) nil))
@@ -1311,6 +1352,7 @@ its preview is exactly what approving it would do."
             (tool . ,tool)
             (arguments . ,(orsb--object call))
             (reason . ,(orsb-arg args 'reason))
+            ,@(when-let* ((b (orsb-arg args 'batch))) `((batch . ,b)))
             (created . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
             (files . ,(orsb--vector
                        (mapcar (lambda (entry)
@@ -1342,7 +1384,10 @@ its preview is exactly what approving it would do."
            (limit (max 1 (min 200 (orsb-arg-int args 'limit 50))))
            (all (mapcar (lambda (f) (orsb-tools--proposal-read (file-name-base f)))
                         (directory-files (orsb-tools--proposal-dir) nil "\\.json\\'")))
-           (kept (seq-filter (lambda (p) (or (equal want "all") (equal (alist-get 'status p) want))) all))
+           (batch (orsb-arg args 'batch))
+           (kept (seq-filter (lambda (p) (and (or (equal want "all") (equal (alist-get 'status p) want))
+                                              (or (null batch) (equal (alist-get 'batch p) batch))))
+                             all))
            ;; ids start with their timestamp: oldest first, the order to decide them in
            (kept (sort kept (lambda (a b) (string< (alist-get 'id a) (alist-get 'id b))))))
       `((status . ,want)
@@ -1350,8 +1395,32 @@ its preview is exactly what approving it would do."
         (proposals . ,(orsb--vector (mapcar #'orsb-tools--proposal-summary (seq-take kept limit))))))))
 
 (defun orsb-tool-decide-proposal (args)
-  "decide_proposal: approve (apply) or reject a stored change."
-  (orsb-require args 'id 'decision)
+  "decide_proposal: approve (apply) or reject one stored change, or a whole batch."
+  (orsb-require args 'decision)
+  (cond
+   ((orsb-arg args 'id) (orsb-tools--decide-one args))
+   ((orsb-arg args 'batch)
+    ;; every pending proposal of the batch, oldest first; one refusal does not stop the rest
+    (let* ((batch (orsb-arg args 'batch))
+           (ids (sort (mapcar (lambda (p) (alist-get 'id p))
+                              (seq-filter (lambda (p) (and (equal (alist-get 'status p) "pending")
+                                                           (equal (alist-get 'batch p) batch)))
+                                          (mapcar (lambda (f) (orsb-tools--proposal-read (file-name-base f)))
+                                                  (directory-files (orsb-tools--proposal-dir) nil "\\.json\\'"))))
+                      #'string<))
+           (done 0) refused)
+      (unless ids (orsb-error-hint 'not-found "get_proposals lists them." "No pending proposal in batch %s" batch))
+      (dolist (id ids)
+        (condition-case err
+            (progn (orsb-tools--decide-one (cons (cons 'id id) (assq-delete-all 'batch (copy-alist args))))
+                   (cl-incf done))
+          (orsb-error (push `((id . ,id) (code . ,(string-replace "-" "_" (symbol-name (nth 1 err)))) (message . ,(nth 2 err))) refused))))
+      `((batch . ,batch) (decision . ,(orsb-arg args 'decision)) (decided . ,done)
+        (refused . ,(orsb--vector (nreverse refused))))))
+   (t (orsb-error 'invalid-argument "Give id (one proposal) or batch (every pending proposal filed under that label)"))))
+
+(defun orsb-tools--decide-one (args)
+  "Approve or reject the proposal ARGS names by id."
   (let* ((p (orsb-tools--proposal-read (orsb-arg args 'id)))
          (decision (orsb-arg args 'decision))
          (def (seq-find (lambda (d) (equal (car d) (alist-get 'tool p))) orsb-tools--definitions))
@@ -1592,6 +1661,12 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (force . ((type . "boolean") (default . :json-false) (description . "Restore even if the files changed again since")))
       (limit . ((type . "integer") (default . 10)))
       ,orsb-tools--dry-run-schema))
+    ("reassign_id" orsb-tool-reassign-id
+     "Give a note a new id when it shares its id with another note (check_schema rule duplicate-id). Only one note per id is visible to search and links; this makes the hidden one visible. Refuses the copy the index holds, since links point at it."
+     ("file")
+     ((file . ((type . "string") (description . "Vault path of the hidden note, as check_schema prints it")))
+      (force . ((type . "boolean") (default . :json-false) (description . "Reassign even the copy the index holds")))
+      ,orsb-tools--dry-run-schema))
     ("get_schema" orsb-tool-get-schema
      "The vocabulary this server enforces: note types (read from the vault's _schema.org files), status values, TODO keywords, tags in use, id forms. With type: that type's required properties, sections, write policy and template. Call this instead of guessing."
      ()
@@ -1601,11 +1676,13 @@ With propose in ARGS the call is filed as a proposal instead of run."
      ()
      ((id . ((type . "string") (description . "One proposal, in full")))
       (status . ((type . "string") (enum . ("pending" "approved" "rejected" "all")) (default . "pending")))
+      (batch . ((type . "string") (description . "Only proposals filed under this batch label")))
       (limit . ((type . "integer") (default . 50)))))
     ("decide_proposal" orsb-tool-decide-proposal
-     "Approve or reject a proposal. Approve applies the stored change and returns its change_id (restore undoes it). If the note changed since the proposal was made it is refused unless force:true."
-     ("id" "decision")
-     ((id . ((type . "string")))
+     "Approve or reject a proposal (id), or every pending proposal of a batch (batch). Approve applies the stored change and returns its change_id (restore undoes it). If the note changed since the proposal was made it is refused unless force:true; in a batch the others are still decided and the refused ones are listed."
+     ("decision")
+     ((id . ((type . "string") (description . "One proposal")))
+      (batch . ((type . "string") (description . "Instead of id: every pending proposal filed under this batch label")))
       (decision . ((type . "string") (enum . ("approve" "reject"))))
       (note . ((type . "string") (description . "Kept with the decision")))
       (force . ((type . "boolean") (default . :json-false) (description . "Apply even though the note changed since")))))
@@ -1626,7 +1703,8 @@ With propose in ARGS the call is filed as a proposal instead of run."
                     (append schema
                             '((propose . ((type . "boolean") (default . :json-false)
                                           (description . "File this change for approval instead of making it; returns proposal_id")))
-                              (reason . ((type . "string") (description . "With propose: why, shown to whoever decides")))))
+                              (reason . ((type . "string") (description . "With propose: why, shown to whoever decides")))
+                              (batch . ((type . "string") (description . "With propose: a label shared by proposals that can be decided together")))))
                   schema)))
     (org-roam-mcp-http--register-tool
      name desc
