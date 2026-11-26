@@ -248,7 +248,11 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
            (types (append (alist-get 'types schema) nil)))
       (should (eq (alist-get 'schema_files schema) t))
       (should (equal (mapcar (lambda (e) (alist-get 'type e)) types) '("note" "project")))
-      (should (equal (alist-get 'parent (cadr types)) "note")))
+      (should (equal (alist-get 'parent (cadr types)) "note"))
+      ;; the root type has no parent: null on the wire, not a string
+      (should-not (alist-get 'parent (car types))))
+    (should (string-search "\"parent\":null"
+                           (alist-get 'text (car (alist-get 'content (alist-get 'result (car (orsb-tools-test--call "get_schema"))))))))
     (let ((project (orsb-tools-test--data "get_schema" 'type "project")))
       (should (equal (append (alist-get 'is_a project) nil) '("note" "project")))
       (should (equal (alist-get 'LIFECYCLE (alist-get 'settings project)) "STATUS"))

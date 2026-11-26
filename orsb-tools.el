@@ -1118,8 +1118,10 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
               `((change_id . ,(cdr r)))))))))
 
 (defun orsb-tools--type-json (entry)
-  "ENTRY of `orsb-schema-tree' with nil values as JSON null."
-  (mapcar (lambda (c) (cons (car c) (or (cdr c) :json-null))) entry))
+  "ENTRY of `orsb-schema-tree' as a JSON object.
+A nil value encodes as null: `json-encode' writes nil that way, and would
+write the keyword :json-null as the string \"json-null\"."
+  (copy-alist entry))
 
 (defun orsb-tools--rows-json (rows names)
   "Schema table ROWS as a JSON array of objects keyed by NAMES."
@@ -1142,7 +1144,7 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
                                          (alist-get 'type schema))))
       (properties . ,(orsb-tools--rows-json (alist-get 'properties schema) '(property required form)))
       (sections . ,(orsb-tools--rows-json (alist-get 'sections schema) '(section required rule)))
-      (template . ,(or (alist-get 'template schema) :json-null)))))
+      (template . ,(alist-get 'template schema)))))
 
 (defun orsb-tool-check-schema (args)
   "check_schema: where the notes depart from the vault's own schema files."
@@ -1249,7 +1251,7 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
     (seq-doseq (f (alist-get 'files proposal))
       (let* ((rel (alist-get 'file f))
              (was (alist-get 'hash f))
-             (was (if (memq was '(nil :json-null :json-false)) nil was))
+             (was (if (member was '(nil :json-null :json-false "json-null")) nil was))
              (now (orsb-core--hash (orsb-core--disk-content (orsb-core--vault-file rel)))))
         (unless (equal was now) (push rel out))))
     (nreverse out)))
@@ -1261,7 +1263,7 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
     `((id . ,(alist-get 'id proposal))
       (status . ,(alist-get 'status proposal))
       (tool . ,(alist-get 'tool proposal))
-      (reason . ,(or (alist-get 'reason proposal) :json-null))
+      (reason . ,(alist-get 'reason proposal))
       (created . ,(alist-get 'created proposal))
       (files . ,(orsb--vector (mapcar (lambda (f) (alist-get 'file f)) (append (alist-get 'files proposal) nil))))
       ,@(when pending `((stale . ,(if stale t :json-false)))))))
@@ -1282,14 +1284,13 @@ its preview is exactly what approving it would do."
             (status . "pending")
             (tool . ,tool)
             (arguments . ,(orsb--object call))
-            (reason . ,(or (orsb-arg args 'reason) :json-null))
+            (reason . ,(orsb-arg args 'reason))
             (created . ,(format-time-string "%Y-%m-%dT%H:%M:%S%z"))
             (files . ,(orsb--vector
                        (mapcar (lambda (entry)
                                  (let ((rel (alist-get 'file entry)))
                                    `((file . ,rel)
-                                     (hash . ,(or (orsb-core--hash (orsb-core--disk-content (orsb-core--vault-file rel)))
-                                                  :json-null)))))
+                                     (hash . ,(orsb-core--hash (orsb-core--disk-content (orsb-core--vault-file rel)))))))
                                preview)))
             (would_change . ,(orsb--vector preview)))))
     (unless preview
@@ -1348,10 +1349,10 @@ its preview is exactly what approving it would do."
                                (append (alist-get 'arguments p) nil)))
              (data (funcall (nth 1 def) call)))
         (orsb-tools--proposal-write
-         (append `((status . "approved") (change_id . ,(or (alist-get 'change_id data) :json-null)))
+         (append `((status . "approved") (change_id . ,(alist-get 'change_id data)))
                  stamp (assq-delete-all 'status (copy-alist p))))
         `((id . ,(alist-get 'id p)) (status . "approved")
-          (change_id . ,(or (alist-get 'change_id data) :json-null))
+          (change_id . ,(alist-get 'change_id data))
           (result . ,(orsb--object data)))))))
 
 (defun orsb-tools--run (fn args)
