@@ -1,7 +1,7 @@
 ;;; orsb-blog.el --- Blog-writing commands for a folder of ox-hugo posts -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.0.0
+;; Version: 3.1.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain

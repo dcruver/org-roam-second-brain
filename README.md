@@ -141,6 +141,11 @@ changed since it was filed is refused unless forced. Proposing lifts only the
 apart: restricting who may call `decide_proposal` is the job of whatever sits
 in front of it.
 
+Proposals that belong together can share a `batch` label when they are filed.
+`decide_proposal` with `batch` decides every pending proposal of that batch
+and lists the ones it refused; in Emacs, `B` on the approval screen does the
+same for the batch of the proposal at point.
+
 Proposals are kept by the notes server that took them, outside the vault. In an
 Emacs that is not that server (a desktop beside a headless server), set
 `orsb-server-url` to the server's address (`http://host:8007/mcp`): `sb/proposals`
@@ -193,6 +198,7 @@ error says what to do next.
 | `get_schema` | the vocabulary the server enforces: the types the vault defines, TODO keywords, tags in use; with `type`, that type's rules |
 | `check_schema` | where existing notes depart from the vault's rules (read-only) |
 | `get_proposals`, `decide_proposal` | changes filed for approval: list or show them, approve or reject |
+| `reassign_id` | give a note that shares its id with another note an id of its own, so both are visible |
 
 Every tool takes `id` as an org-roam id, a vault-relative path, an exact
 title or alias, or `today` / `yesterday` / `YYYY-MM-DD` for a daily note. An
