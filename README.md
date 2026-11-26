@@ -120,7 +120,9 @@ As of %DATE%.
 - The root file may also set `EXCLUDE` (subfolders outside the rules),
   `NOTES_HERE: no` (no note directly in this folder) and `ENFORCE`:
   `strict` refuses a write that breaks a rule, `warn` (the default) makes it
-  and lists what it broke under `warnings`, `off` ignores the rules.
+  and lists what it broke under `warnings`, `off` ignores the rules. `ENFORCE`
+  is inherited like any other key, so one folder can be strict in a vault
+  that otherwise warns.
 - A vault with no `_schema.org` has one type, `note`, and no rules.
 
 `check_schema` lists where existing notes depart from the rules; it changes

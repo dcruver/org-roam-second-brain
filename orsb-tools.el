@@ -133,18 +133,24 @@ JSON null and false both count as absent for scalars."
     (org-roam-node-file node)))
 
 (defun orsb-tools--guard (problems)
-  "Apply the vault's enforcement mode to PROBLEMS, a list of strings.
-Strict refuses the write; warn records them for the result; off ignores."
-  (when problems
-    (pcase (orsb-schema-mode)
-      ('strict (orsb-error-hint 'schema-violation
-                                "get_schema with type shows this note type's rules. A change that needs approval can be filed by repeating the call with propose:true."
-                                "%s" (string-join problems "; ")))
-      ('warn (setq orsb-tools--warnings (append orsb-tools--warnings problems))))))
+  "Apply PROBLEMS, a list of strings, each in the mode its note's type asks for.
+A problem from a strict type refuses the write; one from a warning type is
+recorded for the result; one from a type that switched its rules off is dropped."
+  (let ((strict (seq-filter (lambda (p) (eq (orsb-schema-problem-mode p) 'strict)) problems))
+        (warned (seq-filter (lambda (p) (eq (orsb-schema-problem-mode p) 'warn)) problems)))
+    (when strict
+      (orsb-error-hint 'schema-violation
+                       "get_schema with type shows this note type's rules. A change that needs approval can be filed by repeating the call with propose:true."
+                       "%s" (mapconcat #'substring-no-properties strict "; ")))
+    (when warned
+      (setq orsb-tools--warnings
+            (append orsb-tools--warnings (mapcar #'substring-no-properties warned))))))
 
 (defun orsb-tools--schema-on-p ()
-  "Non-nil when the vault has schema files and has not switched them off."
-  (not (eq (orsb-schema-mode) 'off)))
+  "Non-nil when the vault has schema files.
+Whether a broken rule refuses a write, warns or is ignored is each type's
+own choice (ENFORCE), applied by `orsb-tools--guard'."
+  (orsb-schema-present-p))
 
 (defun orsb-tools--top-section (node section)
   "Return the top-level heading a body edit of NODE lands in.

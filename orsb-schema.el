@@ -447,13 +447,31 @@ approval, and this is that path.  Every other rule still holds.")
 (defun orsb-schema-mode (&optional root)
   "Return how the vault ROOT wants its rules applied to writes.
 `strict' refuses a write that breaks a rule, `warn' lets it through and says
-so, `off' ignores the rules.  The root schema file's ENFORCE key decides;
-with a root schema file and no key it is `warn', without one it is `off'."
+so, `off' ignores the rules.  This is the vault's general mode, from the
+root schema file's ENFORCE key: `warn' with a root file and no key, `off'
+without a root file.  A folder may override it for its own notes; see
+`orsb-schema-mode-of'."
   (let ((root (orsb-schema--root root)))
     (if (not (orsb-schema-present-p root))
         'off
       (pcase (downcase (or (orsb-schema-get (orsb-schema-for-directory root root) "ENFORCE") "warn"))
         ("strict" 'strict) ("off" 'off) (_ 'warn)))))
+
+(defun orsb-schema-mode-of (schema)
+  "Return how SCHEMA wants its rules applied: `strict', `warn' or `off'.
+ENFORCE is an ordinary Type key, so a folder inherits it and may override
+it: a vault can warn in general and be strict about one type."
+  (pcase (downcase (or (orsb-schema-get schema "ENFORCE") "warn"))
+    ("strict" 'strict) ("off" 'off) (_ 'warn)))
+
+(defun orsb-schema--stamp (problems schema)
+  "Return PROBLEMS, each string marked with the mode SCHEMA applies them in."
+  (let ((mode (orsb-schema-mode-of schema)))
+    (mapcar (lambda (p) (propertize p 'orsb-enforce mode)) problems)))
+
+(defun orsb-schema-problem-mode (problem)
+  "Return the mode PROBLEM is to be applied in; `warn' when it carries none."
+  (or (get-text-property 0 'orsb-enforce problem) 'warn))
 
 (defun orsb-schema--type-name (schema)
   "The type SCHEMA describes, for messages."
@@ -504,7 +522,7 @@ MODE is append, prepend or replace.  ROOT is the vault."
       (push (format "%s notes are edited one section at a time: name a section (%s)"
                     type (mapconcat #'car ruled ", "))
             out)))
-    (nreverse out)))
+    (orsb-schema--stamp (nreverse out) schema)))
 
 (defun orsb-schema-property-problems (file props ids &optional root)
   "Return why setting PROPS on note FILE breaks its rules, as strings.
@@ -522,7 +540,7 @@ IDS maps a note id to its file (see `orsb-schema--form-error')."
                 (push (format "%s is required on a %s note" key (orsb-schema--type-name schema)) out))
             (when-let* ((why (orsb-schema--form-error (nth 2 row) value schema ids root)))
               (push (format "%s: %s" key why) out))))))
-    (nreverse out)))
+    (orsb-schema--stamp (nreverse out) schema)))
 
 (defun orsb-schema-operation-problems (file op &optional root)
   "Return why operation OP (delete, move or merge) on note FILE breaks its rules."
@@ -534,7 +552,7 @@ IDS maps a note id to its file (see `orsb-schema--form-error')."
       (push (format "%s notes are never %s" (orsb-schema--type-name schema)
                     (pcase op ("delete" "deleted") ("move" "moved") ("merge" "merged") (_ op)))
             out))
-    (nreverse out)))
+    (orsb-schema--stamp (nreverse out) schema)))
 
 (defun orsb-schema-create-problems (type props ids &optional root)
   "Return why a new TYPE note with PROPS breaks the rules, as strings.
@@ -561,7 +579,7 @@ PROPS is the drawer alist the note would start with."
               (push (format "%s is required on a %s note" key type) out))
           (when-let* ((why (orsb-schema--form-error (nth 2 row) (format "%s" value) schema ids root)))
             (push (format "%s: %s" key why) out)))))
-    (nreverse out)))
+    (orsb-schema--stamp (nreverse out) schema)))
 
 (defun orsb-schema-server-properties (schema &optional time)
   "Return the properties SCHEMA says the server fills in, as an alist.

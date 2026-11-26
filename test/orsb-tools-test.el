@@ -292,7 +292,7 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
                             "* Keywords\n| keyword | value |\n|-\n| date | [%DATE%] |\n| hugo_draft | true |\n\n"
                             "* Template\n** Draft\n"))
   (orsb-test--write "telos/_schema.org"
-                    "* Type\n:PROPERTIES:\n:TYPE: telos\n:NOTES_HERE: yes\n:WRITE: propose\n:NEVER: move merge delete\n:END:\n")
+                    "* Type\n:PROPERTIES:\n:TYPE: telos\n:NOTES_HERE: yes\n:WRITE: propose\n:NEVER: move merge delete\n:ENFORCE: strict\n:END:\n")
   (orsb-test--write "telos/mission.org" ":PROPERTIES:\n:ID: telos-mission\n:END:\n#+title: Mission\n\nTo make things.\n")
   (org-roam-db-sync))
 
@@ -368,6 +368,15 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (equal (alist-get 'warnings made) '("NEXT-ACTION is required on a project note")))
       (let ((r (orsb-tools-test--data "update_body" 'id (alist-get 'id made) 'section "Log" 'mode "replace" 'content "x")))
         (should (string-match-p "append-only" (car (alist-get 'warnings r))))))
+    ;; a type may be strict in a vault that only warns: telos is, here
+    (should (string-match-p "approved proposal"
+                            (alist-get 'message (orsb-tools-test--error "update_body" 'id "telos-mission" 'content "more"))))
+    (should (string-match-p "never deleted" (alist-get 'message (orsb-tools-test--error "delete_node" 'id "telos-mission"))))
+    (should (string-match-p "To make things" (orsb-test--file "telos/mission.org")))
+    ;; and it can still be changed the approved way
+    (let ((pid (alist-get 'proposal_id (orsb-tools-test--data "update_body" 'id "telos-mission" 'content "And to teach." 'propose t))))
+      (orsb-tools-test--data "decide_proposal" 'id pid 'decision "approve")
+      (should (string-match-p "And to teach\\." (orsb-test--file "telos/mission.org"))))
     ;; a write that breaks nothing carries no warnings
     (let ((ok (orsb-tools-test--data "create_node" 'title "Whole plan" 'node_type "project"
                                      'status "active" 'next_action "Go")))
