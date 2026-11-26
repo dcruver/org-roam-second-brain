@@ -34,6 +34,7 @@
 (require 'subr-x)
 (require 'org-roam)
 (require 'orsb-core)
+(require 'orsb-schema)
 ;; Semantic search, stale detection and the embedding queue. Optional: the
 ;; tools degrade to "unavailable" errors when it is not loadable.
 (require 'orsb-search nil t)
@@ -95,7 +96,7 @@
   :type '(repeat string)
   :group 'orsb)
 
-(defconst orsb-tools-version "2.2.1")
+(defconst orsb-tools-version "3.0.0-alpha.1")
 
 ;;;; Argument helpers
 
@@ -1022,8 +1023,64 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
           ,@(if dry `((dry_run . t) (would_change . ,(orsb--vector (cdr r))))
               `((change_id . ,(cdr r)))))))))
 
-(defun orsb-tool-get-schema (_args)
-  "get_schema: the vocabulary this server enforces."
+(defun orsb-tools--type-json (entry)
+  "ENTRY of `orsb-schema-tree' with nil values as JSON null."
+  (mapcar (lambda (c) (cons (car c) (or (cdr c) :json-null))) entry))
+
+(defun orsb-tools--rows-json (rows names)
+  "Schema table ROWS as a JSON array of objects keyed by NAMES."
+  (orsb--vector
+   (mapcar (lambda (row)
+             (let ((i -1))
+               (mapcar (lambda (name) (cons name (or (nth (cl-incf i) row) ""))) names)))
+           rows)))
+
+(defun orsb-tools--type-schema (type)
+  "The merged rules of note TYPE, read from the vault's schema files."
+  (let* ((dir (or (orsb-schema-type-directory type)
+                  (orsb-error-hint 'not-found "get_schema without type lists the types this vault defines."
+                                   "No such note type: %s" type)))
+         (schema (orsb-schema-for-directory dir)))
+    `((type . ,type)
+      (directory . ,(alist-get 'directory schema))
+      (is_a . ,(orsb--vector (alist-get 'types schema)))
+      (settings . ,(orsb--object (mapcar (lambda (c) (cons (intern (car c)) (cdr c)))
+                                         (alist-get 'type schema))))
+      (properties . ,(orsb-tools--rows-json (alist-get 'properties schema) '(property required form)))
+      (sections . ,(orsb-tools--rows-json (alist-get 'sections schema) '(section required rule)))
+      (template . ,(or (alist-get 'template schema) :json-null)))))
+
+(defun orsb-tool-check-schema (args)
+  "check_schema: where the notes depart from the vault's own schema files."
+  (let* ((report (orsb-schema-check))
+         (rule (orsb-arg args 'rule))
+         (type (orsb-arg args 'type))
+         (under (orsb-arg args 'path))
+         (limit (max 1 (min 500 (orsb-arg-int args 'limit 50))))
+         (offset (max 0 (orsb-arg-int args 'offset 0)))
+         (all (seq-filter (lambda (v)
+                            (and (or (not rule) (equal rule (alist-get 'rule v)))
+                                 (or (not type) (equal type (alist-get 'type v)))
+                                 (or (not under) (string-prefix-p under (alist-get 'file v)))))
+                          (alist-get 'violations report)))
+         (counts (lambda (alist) (orsb--object (mapcar (lambda (c) (cons (intern (car c)) (cdr c))) alist)))))
+    `((schema_files . ,(if (orsb-schema-present-p) t :json-false))
+      (notes . ,(alist-get 'notes report))
+      (with_violations . ,(alist-get 'with_violations report))
+      (by_rule . ,(funcall counts (alist-get 'by_rule report)))
+      (by_type . ,(funcall counts (alist-get 'by_type report)))
+      (matching . ,(length all))
+      (offset . ,offset)
+      (violations . ,(orsb--vector (seq-take (seq-drop all offset) limit))))))
+
+(defun orsb-tool-get-schema (args)
+  "get_schema: the vocabulary this server enforces, or with type one type's rules."
+  (if-let* ((type (orsb-arg args 'type)))
+      (orsb-tools--type-schema type)
+    (orsb-tools--get-schema-1)))
+
+(defun orsb-tools--get-schema-1 ()
+  "The whole vocabulary: types, status values, TODO keywords, tags in use."
   (let ((todo (orsb-core--todo-sets)))
     `((version . ,orsb-tools-version)
       (id_forms . ["org-roam id" "path relative to the vault, or absolute" "exact title or alias"
@@ -1043,6 +1100,8 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
       (inbox_heading . ,orsb-inbox-heading)
       (hugo_sections . ,(orsb--vector orsb-hugo-sections))
       (blog_enabled . ,(if orsb-hugo-base-dir t :json-false))
+      (schema_files . ,(if (orsb-schema-present-p) t :json-false))
+      (types . ,(orsb--vector (mapcar #'orsb-tools--type-json (orsb-schema-tree))))
       (envelope . "{ok:true,data} | {ok:false,error:{code,message,hint}} with isError")
       (undo . "Every write returns change_id; restore with that id puts the files back. dry_run:true previews a write without making it."))))
 
@@ -1265,8 +1324,17 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
       (limit . ((type . "integer") (default . 10)))
       ,orsb-tools--dry-run-schema))
     ("get_schema" orsb-tool-get-schema
-     "The vocabulary this server enforces: note types, status values, TODO keywords, tags in use, id forms. Call this instead of guessing."
-     () ()))
+     "The vocabulary this server enforces: note types (read from the vault's _schema.org files), status values, TODO keywords, tags in use, id forms. With type: that type's required properties, sections, write policy and template. Call this instead of guessing."
+     ()
+     ((type . ((type . "string") (description . "A note type; returns its merged rules")))))
+    ("check_schema" orsb-tool-check-schema
+     "Where the notes depart from the vault's own rules: a note in a folder that may not hold notes, a missing required property or section, a value outside its allowed set, a link to the wrong kind of note. Returns counts by rule and by type, and the violations (paged). Reads only; changes nothing."
+     ()
+     ((rule . ((type . "string") (description . "Only this rule: misplaced, untyped-folder, missing-property, bad-value, missing-section")))
+      (type . ((type . "string") (description . "Only notes of this type")))
+      (path . ((type . "string") (description . "Only notes under this folder, e.g. projects/")))
+      (limit . ((type . "integer") (default . 50)))
+      (offset . ((type . "integer") (default . 0))))))
   "The tools: (NAME FUNCTION DESCRIPTION REQUIRED SCHEMA).")
 
 (defun orsb-tools--register-def (name fn desc required schema)

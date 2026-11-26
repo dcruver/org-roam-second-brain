@@ -54,11 +54,12 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
       (should (member "waiting" (alist-get 'status_values schema)))
       (should (equal (alist-get 'stale_days schema) orsb-stale-days))
       (should (equal (cdr (assq 'completed (alist-get 'status_aliases schema))) "done")))
-    ;; exactly these nineteen: no old names, no profiles
+    ;; exactly these twenty: no old names, no profiles
     (orsb-tools-test--ensure-registered)
     (let ((names '("search" "get_node" "list_nodes" "find_related" "create_node" "set_node" "update_body"
                    "set_checkbox" "get_tasks" "link_nodes" "move_node" "merge_nodes" "delete_node"
-                   "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema")))
+                   "add_daily_entry" "log_to_inbox" "resolve_inbox" "get_review" "restore" "get_schema"
+                   "check_schema")))
       (dolist (name names) (should (gethash name org-roam-mcp-http--tools)))
       (should (= (hash-table-count org-roam-mcp-http--tools) (length names))))
     (dolist (gone '("read_note" "read_node" "semantic_search" "create_blog_post" "blog_status" "update_node"
@@ -244,6 +245,43 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (should (equal (alist-get 'status (orsb-tools-test--data "set_node" 'id "b-1" 'status "draft")) "draft"))
     (should (equal (alist-get 'code (orsb-tools-test--error "set_node" 'id "b-1" 'status "done")) "invalid_argument"))
     (should (equal (alist-get 'code (orsb-tools-test--error "set_node" 'id "m-1" 'status "published")) "invalid_argument"))))
+
+;;;; schema files
+
+(ert-deftest orsb-tools-schema-files-drive-get-schema-and-check ()
+  (orsb-test-with-vault
+    ;; no schema files: nothing to report
+    (let ((schema (orsb-tools-test--data "get_schema")))
+      (should (eq (alist-get 'schema_files schema) :json-false))
+      (should-not (append (alist-get 'types schema) nil)))
+    (let ((dir (file-name-as-directory org-roam-directory)))
+      (with-temp-file (expand-file-name "_schema.org" dir)
+        (insert "* Type\n:PROPERTIES:\n:TYPE: note\n:END:\n\n* Properties\n"
+                "| property | required | form |\n|-\n| ID | yes | id |\n"))
+      (make-directory (expand-file-name "projects" dir) t)
+      (with-temp-file (expand-file-name "projects/_schema.org" dir)
+        (insert "* Type\n:PROPERTIES:\n:TYPE: project\n:WRITE: open\n:LIFECYCLE: STATUS\n:END:\n\n"
+                "* Properties\n| property | required | form |\n|-\n| OWNER | yes | text |\n\n"
+                "* Sections\n| section | required | rule |\n|-\n| Log | yes | append |\n")))
+    (let* ((schema (orsb-tools-test--data "get_schema"))
+           (types (append (alist-get 'types schema) nil)))
+      (should (eq (alist-get 'schema_files schema) t))
+      (should (equal (mapcar (lambda (e) (alist-get 'type e)) types) '("note" "project")))
+      (should (equal (alist-get 'parent (cadr types)) "note")))
+    (let ((project (orsb-tools-test--data "get_schema" 'type "project")))
+      (should (equal (append (alist-get 'is_a project) nil) '("note" "project")))
+      (should (equal (alist-get 'LIFECYCLE (alist-get 'settings project)) "STATUS"))
+      (should (equal (mapcar (lambda (r) (alist-get 'property r)) (append (alist-get 'properties project) nil))
+                     '("ID" "OWNER")))
+      (should (equal (alist-get 'rule (car (append (alist-get 'sections project) nil))) "append")))
+    (should (equal (alist-get 'code (orsb-tools-test--error "get_schema" 'type "ghost")) "not_found"))
+    (let ((report (orsb-tools-test--data "check_schema" 'rule "missing-property" 'path "projects/")))
+      (should (eq (alist-get 'schema_files report) t))
+      (should (> (alist-get 'notes report) 0))
+      (should (= (alist-get 'matching report) (length (alist-get 'violations report))))
+      (seq-doseq (v (alist-get 'violations report))
+        (should (equal (alist-get 'rule v) "missing-property"))
+        (should (string-prefix-p "projects/" (alist-get 'file v)))))))
 
 (provide 'orsb-tools-test)
 ;;; orsb-tools-test.el ends here
