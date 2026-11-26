@@ -227,6 +227,19 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
     (let ((rpc (orsb-test--json (org-roam-mcp-http--handle-tools-call '((name . "get_node") (arguments . ()))))))
       (should (= (alist-get 'code (alist-get 'error rpc)) -32602)))))
 
+;;;; title search forgives an extra word
+
+(ert-deftest orsb-tools-title-search-falls-back-to-the-words ()
+  (orsb-test-with-vault
+    ;; as written: the substring match, unchanged
+    (let ((hits (alist-get 'hits (orsb-tools-test--data "search" 'query "Backlog" 'mode "title"))))
+      (should (equal (mapcar (lambda (h) (alist-get 'title h)) hits) '("Project Backlog"))))
+    ;; an extra word no title contains: the note that holds most of the words
+    (let ((hits (alist-get 'hits (orsb-tools-test--data "search" 'query "Project Backlog note" 'mode "title"))))
+      (should (equal (alist-get 'title (car hits)) "Project Backlog")))
+    ;; too little in common is still nothing
+    (should-not (alist-get 'hits (orsb-tools-test--data "search" 'query "Backlog of unrelated garden chores" 'mode "title")))))
+
 ;;;; schema files
 
 (ert-deftest orsb-tools-schema-files-drive-get-schema-and-check ()

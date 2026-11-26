@@ -66,7 +66,9 @@
 - A note's type is the folder it is in. get_schema lists the types; get_schema with type shows what one requires: properties, sections, allowed status values.
 - When you add text to a note, name the section. A section may only grow (append) or be rewritten whole (replace); the type's schema says which.
 - If a write answers with warnings, it was made but broke a rule of the note's type: say which.
-- If a write is refused because the change needs approval, repeat the same call with propose:true and a reason. That writes nothing: say it is waiting for approval, never that it was done."
+- If a write is refused because the change needs approval, repeat the same call with propose:true and a reason. That writes nothing: say it is waiting for approval, never that it was done.
+- Approving is the owner's decision. Do not offer to approve a proposal yourself, and call decide_proposal only when the user names the proposal and tells you to approve or reject it.
+- Before creating a note for something the user speaks of as existing (\"my X project\"), search for it by its short name; create it only when the user asks for something new."
   "Text sent to MCP clients at initialize, as guidance for the model.\nnil sends none."
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
@@ -387,7 +389,23 @@ FIELDS are total, returned and, when more remain, next_offset."
            (unless (gethash (car row) seen)
              (puthash (car row) t seen)
              (when-let ((n (org-roam-node-from-id (car row))))
-               (push (list n nil nil) hits))))))
+               (push (list n nil nil) hits))))
+         ;; Nothing contains the query as written.  A model often adds a word
+         ;; ("Fence repair project" for the note "Fence repair") and, finding
+         ;; nothing, makes a duplicate.  Fall back to the notes whose title
+         ;; holds most of the query's words, best first.
+         (unless hits
+           (let* ((words (seq-uniq (split-string (downcase query) "[^[:alnum:]]+" t)))
+                  (need (max 1 (ceiling (* 0.6 (length words)))))
+                  scored)
+             (dolist (row (org-roam-db-query [:select [id title] :from nodes :where (= level 0)]))
+               (let* ((title-words (split-string (downcase (or (cadr row) "")) "[^[:alnum:]]+" t))
+                      (found (seq-count (lambda (w) (member w title-words)) words)))
+                 (when (>= found need) (push (cons found (car row)) scored))))
+             (dolist (cell (sort scored (lambda (x y) (< (car x) (car y)))))
+               (when-let ((n (org-roam-node-from-id (cdr cell))))
+                 (push (list n (/ (float (car cell)) (length words)) '((match . "words"))) hits)))
+             (setq hits (nreverse hits))))))
       ("contextual"
        (let ((words (split-string (downcase query) "[^[:alnum:]_-]+" t)))
          (unless words (orsb-error 'invalid-argument "query has no words to look for"))
