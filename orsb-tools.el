@@ -150,6 +150,51 @@ JSON null and false both count as absent for scalars."
   "ALIST as a JSON object (empty alist encodes as {} not null)."
   (or alist (make-hash-table)))
 
+;;;; The vault's own rules (orsb-schema)
+
+(defvar orsb-tools--warnings nil
+  "Rules a write broke while the vault only warns; reported with the result.")
+
+(defun orsb-tools--id-file (id)
+  "Return the file of the note with ID, or nil."
+  (when-let* ((node (org-roam-node-from-id id)))
+    (org-roam-node-file node)))
+
+(defun orsb-tools--guard (problems)
+  "Apply the vault's enforcement mode to PROBLEMS, a list of strings.
+Strict refuses the write; warn records them for the result; off ignores."
+  (when problems
+    (pcase (orsb-schema-mode)
+      ('strict (orsb-error-hint 'schema-violation
+                                "get_schema with type shows this note type's rules; check_schema lists what already departs from them."
+                                "%s" (string-join problems "; ")))
+      ('warn (setq orsb-tools--warnings (append orsb-tools--warnings problems))))))
+
+(defun orsb-tools--schema-on-p ()
+  "Non-nil when the vault has schema files and has not switched them off."
+  (not (eq (orsb-schema-mode) 'off)))
+
+(defun orsb-tools--top-section (node section)
+  "Return the top-level heading a body edit of NODE lands in.
+SECTION is the tool's section argument; a heading node edits its own
+top-level heading."
+  (or section
+      (when (> (org-roam-node-level node) 0)
+        (or (car (org-roam-node-olp node)) (org-roam-node-title node)))))
+
+(defun orsb-tools--node-type (node props)
+  "Return the type of NODE: where it lives when the vault has schema files,
+else its NODE-TYPE in PROPS."
+  (if (orsb-tools--schema-on-p)
+      (orsb-schema-get (orsb-schema-for-file (org-roam-node-file node)) "TYPE")
+    (cdr (assoc "NODE-TYPE" props))))
+
+(defun orsb-tools--lifecycle-key (file)
+  "Return the property that holds the status of the note FILE."
+  (or (and (orsb-tools--schema-on-p)
+           (orsb-schema-get (orsb-schema-for-file file) "LIFECYCLE"))
+      "STATUS"))
+
 ;;;; Records
 
 (defun orsb-tools--relative (file)
@@ -176,7 +221,7 @@ JSON null and false both count as absent for scalars."
       (title . ,(org-roam-node-title node))
       (file . ,(orsb-tools--relative (org-roam-node-file node)))
       (level . ,(org-roam-node-level node))
-      (node_type . ,(cdr (assoc "NODE-TYPE" props)))
+      (node_type . ,(orsb-tools--node-type node props))
       (status . ,status)
       (todo . ,(org-roam-node-todo node))
       (tags . ,(orsb--vector (org-roam-node-tags node)))
@@ -217,7 +262,7 @@ JSON null and false both count as absent for scalars."
        (title . ,(alist-get 'title rec))
        (file . ,(orsb-tools--relative (alist-get 'file rec)))
        (level . ,(alist-get 'level rec))
-       (node_type . ,(alist-get 'node_type rec))
+       (node_type . ,(alist-get 'node_type light))
        (status . ,(alist-get 'status rec))
        (todo . ,(alist-get 'todo rec))
        (tags . ,(alist-get 'tags rec))
@@ -397,7 +442,7 @@ FIELDS are total, returned and, when more remain, next_offset."
       (_ (orsb-error 'invalid-argument "mode must be title, contextual or semantic")))
     (setq hits (nreverse hits))
     (when type
-      (setq hits (seq-filter (lambda (h) (equal (cdr (assoc "NODE-TYPE" (org-roam-node-properties (car h)))) type)) hits)))
+      (setq hits (seq-filter (lambda (h) (equal (orsb-tools--node-type (car h) (org-roam-node-properties (car h))) type)) hits)))
     (if (member mode '("contextual" "semantic"))
         (setq hits (seq-sort-by #'cadr #'> hits))
       ;; title: an exact match first, then shorter (closer) titles
@@ -561,7 +606,7 @@ the database only; no bodies."
           (when-let ((n (orsb-core--first-node-in-file f)))
             (let ((info (ignore-errors (orsb-search-chunk-info f pos 200))))
               (push (append (orsb-tools--ref n)
-                            `((node_type . ,(cdr (assoc "NODE-TYPE" (org-roam-node-properties n))))
+                            `((node_type . ,(orsb-tools--node-type n (org-roam-node-properties n)))
                               (score . ,score)
                               (linked . ,(if (member f linked) t :json-false))
                               ,@(when (plist-get info :heading) `((section . ,(plist-get info :heading))))
@@ -600,6 +645,53 @@ checks titles and aliases only."
                         (error nil)))))
       (seq-uniq (delq nil (append exact similar)) (lambda (a b) (equal (alist-get 'id a) (alist-get 'id b)))))))
 
+(defconst orsb-tools--create-reserved
+  '(title node_type parent_id on_duplicate body status tags properties dry_run section todo scheduled deadline)
+  "Arguments of create_node that are not a note property.")
+
+(defun orsb-tools--create-by-schema (args type title)
+  "Create a TYPE note titled TITLE the way the vault's schema files say.
+The folder, the required properties and the starting body all come from the
+type's merged schema.  Any other argument in ARGS that names one of the
+type's properties (next_action for NEXT-ACTION) sets that property."
+  (let* ((dir (or (orsb-schema-type-directory type)
+                  (orsb-error-hint 'invalid-argument
+                                   "get_schema lists the note types this vault defines."
+                                   "No such note type: %s (this vault has %s)" type
+                                   (mapconcat (lambda (e) (alist-get 'type e)) (orsb-schema-tree) ", "))))
+         (schema (orsb-schema-for-directory dir))
+         (known (mapcar (lambda (r) (upcase (car r))) (alist-get 'properties schema)))
+         (lifecycle (orsb-schema-get schema "LIFECYCLE"))
+         (props (orsb-schema-server-properties schema)))
+    (dolist (cell args)
+      (let ((key (upcase (replace-regexp-in-string "_" "-" (symbol-name (car cell))))))
+        (when (and (not (memq (car cell) orsb-tools--create-reserved))
+                   (member key known)
+                   (orsb-arg args (car cell)))
+          (setf (alist-get key props nil nil #'equal) (format "%s" (orsb-arg args (car cell)))))))
+    (when-let* ((st (orsb-arg args 'status)))
+      (setf (alist-get (or lifecycle "STATUS") props nil nil #'equal) st))
+    (dolist (cell (orsb-arg-props args 'properties))
+      (setf (alist-get (upcase (car cell)) props nil nil #'equal) (format "%s" (cdr cell))))
+    (orsb-tools--guard (orsb-schema-create-problems type props #'orsb-tools--id-file))
+    (orsb-tools--change
+     args "create_node" (format "create %s" title)
+     (lambda ()
+       (let* ((id (org-id-new))
+              (tags (orsb-arg-list args 'tags))
+              (stamp (format-time-string "%Y%m%d%H%M%S"))
+              (path (expand-file-name (format "%s-%s.org" (orsb-core--slug title) stamp) dir)))
+         (make-directory dir t)
+         (while (file-exists-p path)
+           (setq path (expand-file-name (format "%s-%s-%d.org" (orsb-core--slug title) stamp (random 1000)) dir)))
+         (orsb-core--write-new-file
+          path
+          (cons (cons "ID" id) (seq-remove (lambda (c) (equal (car c) "ID")) (reverse props)))
+          `(("title" . ,title)
+            ("filetags" . ,(and tags (concat ":" (string-join tags ":") ":"))))
+          (orsb-schema-new-body schema title (orsb-arg args 'body)))
+         (append '((created . t)) (orsb-tools--full-record (orsb-core-resolve id) nil)))))))
+
 (defun orsb-tool-create-node (args)
   "create_node: a typed note, or with parent_id a heading inside a note."
   (orsb-require args 'title)
@@ -623,8 +715,15 @@ checks titles and aliases only."
      ((and dups (equal on-dup "use_existing") (alist-get 'id (car dups)))
       (append '((created . :json-false))
               (orsb-tools--full-record (orsb-core-resolve (alist-get 'id (car dups))) nil)))
+     ((and (not parent) (orsb-tools--schema-on-p))
+      (orsb-tools--create-by-schema args type title))
      (t
-      (let ((status (when-let ((s (orsb-arg args 'status))) (orsb-tools--check-status s type))))
+      (when (and parent (orsb-tools--schema-on-p))
+        (orsb-tools--guard (orsb-schema-body-problems (org-roam-node-file parent)
+                                                      (orsb-tools--top-section parent (orsb-arg args 'section))
+                                                      "append")))
+      (let ((status (when-let ((s (orsb-arg args 'status)))
+                      (if (and parent (orsb-tools--schema-on-p)) s (orsb-tools--check-status s type)))))
         (orsb-tools--change
          args "create_node" (format "create %s" title)
          (lambda ()
@@ -672,6 +771,18 @@ checks titles and aliases only."
   "set_node: title, status, todo, planning, properties, tags, aliases, keywords."
   (orsb-require args 'id)
   (let* ((node (orsb-core-resolve (orsb-arg args 'id))))
+    (when (and (orsb-tools--schema-on-p) (not (orsb-arg args 'heading)))
+      (let ((file (org-roam-node-file node)))
+        (orsb-tools--guard
+         (if (= (org-roam-node-level node) 0)
+             (orsb-schema-property-problems
+              file
+              (append (when-let* ((st (orsb-arg args 'status)))
+                        (list (cons (orsb-tools--lifecycle-key file) st)))
+                      (orsb-arg-props args 'properties))
+              #'orsb-tools--id-file)
+           ;; a heading's properties are its own; only the type's write policy applies
+           (orsb-schema-property-problems file nil #'orsb-tools--id-file)))))
     (orsb-tools--change
      args "set_node" (format "set %s" (org-roam-node-title node))
      (lambda ()
@@ -685,7 +796,11 @@ checks titles and aliases only."
              (unless (eq (alist-get 'update_links args) :json-false)
                (setq links-updated (orsb-core-propagate-rename node old title)))))
          (when-let ((status (orsb-arg args 'status)))
-           (orsb-core-set-properties node `(("STATUS" . ,(orsb-tools--check-status status node)))) (push "status" changed))
+           (if (and (orsb-tools--schema-on-p) (= (org-roam-node-level node) 0))
+               ;; the vault's schema names the property and its values; the guard above checked it
+               (orsb-core-set-properties node `((,(orsb-tools--lifecycle-key (org-roam-node-file node)) . ,status)))
+             (orsb-core-set-properties node `(("STATUS" . ,(orsb-tools--check-status status node)))))
+           (push "status" changed))
          (when (assq 'todo args)
            (orsb-core-set-todo node (orsb-arg args 'todo)) (push "todo" changed))
          (dolist (what '(scheduled deadline))
@@ -725,6 +840,9 @@ checks titles and aliases only."
          (force (orsb-arg-bool args 'force)))
     (unless (member mode '("append" "prepend" "replace"))
       (orsb-error 'invalid-argument "mode must be append, prepend or replace"))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard (orsb-schema-body-problems (org-roam-node-file node)
+                                                    (orsb-tools--top-section node section) mode)))
     (cl-flet ((size () (length (or (if section
                                        (condition-case nil (orsb-core-section-body node section) (orsb-error nil))
                                      (orsb-core-node-body node))
@@ -838,6 +956,11 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
                       (orsb-arg-bool args 'archive))))
          (level (org-roam-node-level node))
          (backlinks (orsb-core-backlinks node t)))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard
+       (if (= level 0)
+           (orsb-schema-operation-problems (org-roam-node-file node) "delete")
+         (orsb-schema-body-problems (org-roam-node-file node) (orsb-tools--top-section node nil) "replace"))))
     (orsb-tools--change
      args "delete_node" (format "%s %s" (if (and archive (= level 0)) "archive" "delete") (org-roam-node-title node))
      (lambda ()
@@ -883,6 +1006,14 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
          (target (when-let ((tg (orsb-arg args 'target_id))) (orsb-core-resolve tg))))
     (unless (or to-note target)
       (orsb-error 'invalid-argument "give target_id (where it goes) or to_note:true (make it a note of its own)"))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard
+       (append (if (= (org-roam-node-level node) 0)
+                   (orsb-schema-operation-problems (org-roam-node-file node) "move")
+                 (orsb-schema-body-problems (org-roam-node-file node) (orsb-tools--top-section node nil) "replace"))
+               (when target
+                 (orsb-schema-body-problems (org-roam-node-file target)
+                                            (orsb-tools--top-section target (orsb-arg args 'section)) "append")))))
     (orsb-tools--change
      args "move_node" (format "move %s" (org-roam-node-title node))
      (lambda ()
@@ -901,6 +1032,11 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
   (orsb-require args 'id 'target_id)
   (let* ((source (orsb-core-resolve (orsb-arg args 'id)))
          (target (orsb-core-resolve (orsb-arg args 'target_id))))
+    (when (orsb-tools--schema-on-p)
+      (orsb-tools--guard
+       (append (orsb-schema-operation-problems (org-roam-node-file source) "merge")
+               (orsb-schema-body-problems (org-roam-node-file target)
+                                          (orsb-tools--top-section target (orsb-arg args 'section)) "append"))))
     (orsb-tools--change
      args "merge_nodes" (format "merge %s into %s" (org-roam-node-title source) (org-roam-node-title target))
      (lambda ()
@@ -1129,9 +1265,14 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
 
 (defun orsb-tools--envelope (fn args)
   "Run FN on ARGS and return the JSON envelope."
-  (let ((r (orsb-tools--run fn args)))
+  (let* ((orsb-tools--warnings nil)
+         (r (orsb-tools--run fn args)))
     (if (eq (car r) :ok)
-        (json-encode `((ok . t) (data . ,(orsb--object (nth 1 r)))))
+        (json-encode `((ok . t)
+                       (data . ,(orsb--object
+                                 (if (and orsb-tools--warnings (listp (nth 1 r)))
+                                     (append (nth 1 r) `((warnings . ,(orsb--vector orsb-tools--warnings))))
+                                   (nth 1 r))))))
       (json-encode `((ok . :json-false)
                      (error . ((code . ,(replace-regexp-in-string "-" "_" (symbol-name (nth 1 r))))
                                (message . ,(nth 2 r))
@@ -1189,7 +1330,7 @@ Accepts the pre-2.0 `node_id' / `identifier' spellings too."
      "Create a note of a type, or with parent_id a heading (task, section) inside a note. If a note with the same title exists nothing is created and possible_duplicates is returned; on_duplicate decides."
      ("title")
      ((title . ((type . "string")))
-      (node_type . ((type . "string") (enum . ("note" "project" "person" "idea" "admin" "blog" "reference" "howto")) (default . "note")))
+      (node_type . ((type . "string") (default . "note") (description . "A note type; get_schema lists the ones this vault defines")))
       (parent_id . ((type . "string") (description . "Create a heading inside this note instead of a new note")))
       (section . ((type . "string") (description . "With parent_id: nest under this heading")))
       (body . ((type . "string")))

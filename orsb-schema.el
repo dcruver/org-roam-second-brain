@@ -323,10 +323,16 @@ An alist: `properties' (file-level drawer, keys upcased), `headings'
         ((string-match "\\`id:\\(\\S-+\\)\\'" value) (match-string 1 value))
         ((string-match-p "\\`\\S-+\\'" value) value)))
 
+(defun orsb-schema--id-file (ids id)
+  "Return the file of note ID according to IDS, a hash table or a function."
+  (cond ((hash-table-p ids) (gethash id ids))
+        ((functionp ids) (funcall ids id))))
+
 (defun orsb-schema--form-error (form value schema ids root)
   "Return why VALUE does not fit FORM, or nil when it does.
-SCHEMA resolves \"one of KEY\"; IDS maps a note id to its file, for links
-in the vault ROOT.  A form this function does not know accepts any value."
+SCHEMA resolves \"one of KEY\"; IDS maps a note id to its file (a hash table,
+or a function of the id), for links in the vault ROOT.  A form this function
+does not know accepts any value."
   (let ((f (downcase (string-trim (or form "")))))
     (cond
      ((string-prefix-p "one of " f)
@@ -343,7 +349,7 @@ in the vault ROOT.  A form this function does not know accepts any value."
         (format "\"%s\" is not a date" value)))
      ((string-prefix-p "link" f)
       (let* ((id (orsb-schema--link-id value))
-             (target (and id (gethash id ids)))
+             (target (and id (orsb-schema--id-file ids id)))
              (want (and (string-match "\\btype +\\([^ .,]+\\)" f) (match-string 1 f))))
         (cond ((not target) (format "\"%s\" does not link to a note in the vault" value))
               ((and want
@@ -421,6 +427,148 @@ alists with file, type, rule and detail.  Nothing is changed."
           (by_type . ,(sort by-type (lambda (a b) (> (cdr a) (cdr b)))))
           (types . ,(orsb-schema-tree root))
           (violations . ,(nreverse violations)))))))
+
+;;;; Rules on writes
+
+(defun orsb-schema-mode (&optional root)
+  "Return how the vault ROOT wants its rules applied to writes.
+`strict' refuses a write that breaks a rule, `warn' lets it through and says
+so, `off' ignores the rules.  The root schema file's ENFORCE key decides;
+with a root schema file and no key it is `warn', without one it is `off'."
+  (let ((root (orsb-schema--root root)))
+    (if (not (orsb-schema-present-p root))
+        'off
+      (pcase (downcase (or (orsb-schema-get (orsb-schema-for-directory root root) "ENFORCE") "warn"))
+        ("strict" 'strict) ("off" 'off) (_ 'warn)))))
+
+(defun orsb-schema--type-name (schema)
+  "The type SCHEMA describes, for messages."
+  (or (orsb-schema-get schema "TYPE") "note"))
+
+(defun orsb-schema--policy (schema)
+  "The WRITE policy of SCHEMA: open, append, propose or readonly."
+  (downcase (or (orsb-schema-get schema "WRITE") "open")))
+
+(defun orsb-schema--policy-problem (schema)
+  "Return why SCHEMA's WRITE policy forbids any direct change, or nil."
+  (pcase (orsb-schema--policy schema)
+    ("readonly" (format "%s notes are read-only" (orsb-schema--type-name schema)))
+    ("propose" (format "%s notes change only through an approved proposal" (orsb-schema--type-name schema)))))
+
+(defun orsb-schema-section-rule (schema section)
+  "Return the rule SCHEMA gives the section named SECTION, or nil."
+  (when section
+    (when-let* ((row (seq-find (lambda (r) (string= (downcase (car r)) (downcase (string-trim section))))
+                               (alist-get 'sections schema)))
+                (rule (downcase (or (nth 2 row) ""))))
+      (unless (string-empty-p rule) rule))))
+
+(defun orsb-schema-body-problems (file section mode &optional root)
+  "Return why changing the body of note FILE breaks its rules, as strings.
+SECTION is the top-level heading being edited (nil for the whole note) and
+MODE is append, prepend or replace.  ROOT is the vault."
+  (let* ((schema (orsb-schema-for-file file root))
+         (type (orsb-schema--type-name schema))
+         (rule (orsb-schema-section-rule schema section))
+         (ruled (seq-filter (lambda (r) (not (string-empty-p (or (nth 2 r) "")))) (alist-get 'sections schema)))
+         out)
+    (when-let* ((why (orsb-schema--policy-problem schema))) (push why out))
+    (when (and (equal (orsb-schema--policy schema) "append") (not (equal mode "append")))
+      (push (format "%s notes are append-only: use mode append" type) out))
+    (cond
+     ((equal rule "replace")
+      (unless (equal mode "replace")
+        (push (format "section \"%s\" is rewritten whole, never added to: use mode replace" section) out)))
+     ((equal rule "append")
+      (unless (equal mode "append")
+        (push (format "section \"%s\" is append-only: use mode append" section) out)))
+     ((equal rule "propose")
+      (push (format "section \"%s\" changes only through an approved proposal" section) out))
+     ((and (not section) ruled)
+      (push (format "%s notes are edited one section at a time: name a section (%s)"
+                    type (mapconcat #'car ruled ", "))
+            out)))
+    (nreverse out)))
+
+(defun orsb-schema-property-problems (file props ids &optional root)
+  "Return why setting PROPS on note FILE breaks its rules, as strings.
+PROPS is an alist of (KEY . value); a nil or empty value removes the property.
+IDS maps a note id to its file (see `orsb-schema--form-error')."
+  (let* ((schema (orsb-schema-for-file file root)) out)
+    (when-let* ((why (orsb-schema--policy-problem schema))) (push why out))
+    (dolist (cell props)
+      (let* ((key (upcase (format "%s" (car cell))))
+             (value (and (cdr cell) (format "%s" (cdr cell))))
+             (row (seq-find (lambda (r) (string= (upcase (car r)) key)) (alist-get 'properties schema))))
+        (when row
+          (if (or (null value) (string-empty-p value))
+              (when (orsb-schema--yes (nth 1 row))
+                (push (format "%s is required on a %s note" key (orsb-schema--type-name schema)) out))
+            (when-let* ((why (orsb-schema--form-error (nth 2 row) value schema ids root)))
+              (push (format "%s: %s" key why) out))))))
+    (nreverse out)))
+
+(defun orsb-schema-operation-problems (file op &optional root)
+  "Return why operation OP (delete, move or merge) on note FILE breaks its rules."
+  (let* ((schema (orsb-schema-for-file file root))
+         (never (split-string (downcase (or (orsb-schema-get schema "NEVER") "")) "[ ,]+" t))
+         out)
+    (when-let* ((why (orsb-schema--policy-problem schema))) (push why out))
+    (when (member op never)
+      (push (format "%s notes are never %s" (orsb-schema--type-name schema)
+                    (pcase op ("delete" "deleted") ("move" "moved") ("merge" "merged") (_ op)))
+            out))
+    (nreverse out)))
+
+(defun orsb-schema-create-problems (type props ids &optional root)
+  "Return why a new TYPE note with PROPS breaks the rules, as strings.
+PROPS is the drawer alist the note would start with."
+  (let* ((root (orsb-schema--root root))
+         (dir (orsb-schema-type-directory type root))
+         (schema (orsb-schema-for-directory dir root))
+         out)
+    (when (and (string= (downcase (or (orsb-schema-get schema "NOTES_HERE") "yes")) "no")
+               (equal (alist-get 'type-directory schema) (alist-get 'directory schema)))
+      (push (format "no note may sit directly in %s"
+                    (if (string= (alist-get 'directory schema) "") "the vault's top folder"
+                      (alist-get 'directory schema)))
+            out))
+    (when (equal (orsb-schema--policy schema) "readonly")
+      (push (format "%s notes are read-only" type) out))
+    (dolist (row (alist-get 'properties schema))
+      (let* ((key (upcase (car row)))
+             (value (cdr (assoc key props))))
+        (if (or (null value) (string-empty-p (format "%s" value)))
+            ;; a property whose form is "id" is the note's own id, given at creation
+            (when (and (orsb-schema--yes (nth 1 row))
+                       (not (string= (downcase (string-trim (or (nth 2 row) ""))) "id")))
+              (push (format "%s is required on a %s note" key type) out))
+          (when-let* ((why (orsb-schema--form-error (nth 2 row) (format "%s" value) schema ids root)))
+            (push (format "%s: %s" key why) out)))))
+    (nreverse out)))
+
+(defun orsb-schema-server-properties (schema &optional time)
+  "Return the properties SCHEMA says the server fills in, as an alist.
+A property whose form says \"set by the server\" and begins with \"date\"
+gets the date of TIME (now by default)."
+  (let (out)
+    (dolist (row (alist-get 'properties schema))
+      (let ((form (downcase (or (nth 2 row) ""))))
+        (when (and (string-match-p "set by the server" form) (string-prefix-p "date" form))
+          (push (cons (upcase (car row)) (format-time-string "[%Y-%m-%d]" time)) out))))
+    (nreverse out)))
+
+(defun orsb-schema-new-body (schema title &optional body time)
+  "Return the body a new note of SCHEMA titled TITLE starts with.
+The template with %DATE% and %TITLE% filled in; BODY, when given, goes before
+the template's first heading."
+  (let* ((tpl (or (alist-get 'template schema) ""))
+         (tpl (replace-regexp-in-string "%DATE%" (format-time-string "%Y-%m-%d" time) tpl t t))
+         (tpl (replace-regexp-in-string "%TITLE%" (or title "") tpl t t))
+         (body (and body (not (string-blank-p body)) (string-trim-right body))))
+    (cond ((string-empty-p tpl) body)
+          ((not body) tpl)
+          (t (concat body "\n\n" tpl)))))
 
 (provide 'orsb-schema)
 ;;; orsb-schema.el ends here

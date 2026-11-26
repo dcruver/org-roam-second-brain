@@ -283,5 +283,103 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
         (should (equal (alist-get 'rule v) "missing-property"))
         (should (string-prefix-p "projects/" (alist-get 'file v)))))))
 
+;;;; the vault's rules on writes
+
+(defun orsb-tools-test--schema-vault (enforce)
+  "Give the test vault schema files, with ENFORCE as the root's mode."
+  (orsb-test--write "_schema.org"
+                    (concat "* Type\n:PROPERTIES:\n:TYPE: note\n:NOTES_HERE: no\n:ENFORCE: " enforce "\n:END:\n\n"
+                            "* Properties\n| property | required | form |\n|-\n| ID | yes | id |\n"
+                            "| CREATED | no | date, set by the server |\n"))
+  (orsb-test--write "projects/_schema.org"
+                    (concat "* Type\n:PROPERTIES:\n:TYPE: project\n:NOTES_HERE: yes\n:LIFECYCLE: STATUS\n"
+                            ":LIFECYCLE_VALUES: active waiting done\n:END:\n\n"
+                            "* Properties\n| property | required | form |\n|-\n"
+                            "| STATUS | yes | one of LIFECYCLE_VALUES |\n| NEXT-ACTION | yes | one sentence |\n\n"
+                            "* Sections\n| section | required | rule |\n|-\n"
+                            "| Current state | yes | replace |\n| Log | yes | append |\n| Design | no | propose |\n\n"
+                            "* Template\n** Current state\nAs of %DATE%.\n** Log\n** Design\n"))
+  (orsb-test--write "telos/_schema.org"
+                    "* Type\n:PROPERTIES:\n:TYPE: telos\n:NOTES_HERE: yes\n:WRITE: propose\n:NEVER: move merge delete\n:END:\n")
+  (orsb-test--write "telos/mission.org" ":PROPERTIES:\n:ID: telos-mission\n:END:\n#+title: Mission\n\nTo make things.\n")
+  (org-roam-db-sync))
+
+(ert-deftest orsb-tools-a-note-is-created-the-way-its-schema-says ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let* ((made (orsb-tools-test--data "create_node" 'title "Rack the server" 'node_type "project"
+                                        'status "active" 'next_action "Buy rails" 'body "Lead text."))
+           (file (alist-get 'file made))
+           (text (orsb-test--file file)))
+      (should (eq (alist-get 'created made) t))
+      (should (string-prefix-p "projects/" file))
+      (should (equal (alist-get 'node_type made) "project"))
+      (should (string-match-p "^:STATUS: active$" text))
+      (should (string-match-p "^:NEXT-ACTION: Buy rails$" text))
+      (should (string-match-p "^:CREATED: \\[[0-9-]+\\]$" text))
+      (should-not (string-match-p "NODE-TYPE" text))
+      (should (string-match-p "Lead text\\.\n\n\\* Current state\nAs of [0-9-]+\\.\n\\* Log\n\\* Design" text)))
+    ;; a required property is missing; a value is outside the set; the type does not exist; the root holds no notes
+    (should (string-match-p "NEXT-ACTION is required"
+                            (alist-get 'message (orsb-tools-test--error "create_node" 'title "No plan" 'node_type "project"
+                                                                        'status "active"))))
+    (should (equal (alist-get 'code (orsb-tools-test--error "create_node" 'title "Odd" 'node_type "project"
+                                                            'status "paused" 'next_action "x"))
+                   "schema_violation"))
+    (should (string-match-p "No such note type: ghost"
+                            (alist-get 'message (orsb-tools-test--error "create_node" 'title "X" 'node_type "ghost"))))
+    (should (string-match-p "top folder"
+                            (alist-get 'message (orsb-tools-test--error "create_node" 'title "Loose" 'node_type "note"))))))
+
+(ert-deftest orsb-tools-sections-and-policies-are-enforced ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "strict")
+    (let ((id (alist-get 'id (orsb-tools-test--data "create_node" 'title "Fan curve" 'node_type "project"
+                                                    'status "active" 'next_action "Measure"))))
+      ;; Log only grows
+      (orsb-tools-test--data "update_body" 'id id 'section "Log" 'content "- 2026-11-25 measured")
+      (should (string-match-p "append-only"
+                              (alist-get 'message (orsb-tools-test--error "update_body" 'id id 'section "Log"
+                                                                          'mode "replace" 'content "gone"))))
+      ;; Current state is rewritten whole
+      (orsb-tools-test--data "update_body" 'id id 'section "Current state" 'mode "replace" 'content "As of now: done.")
+      (should (string-match-p "rewritten whole"
+                              (alist-get 'message (orsb-tools-test--error "update_body" 'id id 'section "Current state"
+                                                                          'content "and also"))))
+      ;; Design needs a proposal; the whole note needs a section
+      (should (string-match-p "approved proposal"
+                              (alist-get 'message (orsb-tools-test--error "update_body" 'id id 'section "Design"
+                                                                          'content "we decided"))))
+      (should (string-match-p "name a section"
+                              (alist-get 'message (orsb-tools-test--error "update_body" 'id id 'content "stray"))))
+      ;; a section the schema does not name is free
+      (orsb-tools-test--data "update_body" 'id id 'section "Scratch" 'create_section t 'content "anything")
+      ;; status: inside the set or refused
+      (orsb-tools-test--data "set_node" 'id id 'status "waiting")
+      (should (string-match-p "not one of"
+                              (alist-get 'message (orsb-tools-test--error "set_node" 'id id 'status "paused"))))
+      (should (string-match-p "NEXT-ACTION is required"
+                              (alist-get 'message (orsb-tools-test--error "set_node" 'id id
+                                                                          'properties '((NEXT-ACTION . "")))))))
+    ;; telos: nothing changes it directly
+    (should (string-match-p "approved proposal"
+                            (alist-get 'message (orsb-tools-test--error "update_body" 'id "telos-mission" 'content "more"))))
+    (should (string-match-p "never deleted"
+                            (alist-get 'message (orsb-tools-test--error "delete_node" 'id "telos-mission"))))
+    (should (string-match-p "To make things" (orsb-test--file "telos/mission.org")))))
+
+(ert-deftest orsb-tools-warn-mode-writes-and-says-so ()
+  (orsb-test-with-vault
+    (orsb-tools-test--schema-vault "warn")
+    (let ((made (orsb-tools-test--data "create_node" 'title "Half a plan" 'node_type "project" 'status "active")))
+      (should (eq (alist-get 'created made) t))
+      (should (equal (alist-get 'warnings made) '("NEXT-ACTION is required on a project note")))
+      (let ((r (orsb-tools-test--data "update_body" 'id (alist-get 'id made) 'section "Log" 'mode "replace" 'content "x")))
+        (should (string-match-p "append-only" (car (alist-get 'warnings r))))))
+    ;; a write that breaks nothing carries no warnings
+    (let ((ok (orsb-tools-test--data "create_node" 'title "Whole plan" 'node_type "project"
+                                     'status "active" 'next_action "Go")))
+      (should-not (alist-get 'warnings ok)))))
+
 (provide 'orsb-tools-test)
 ;;; orsb-tools-test.el ends here
