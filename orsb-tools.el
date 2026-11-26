@@ -1582,9 +1582,9 @@ With propose in ARGS the call is filed as a proposal instead of run."
       (note . ((type . "string") (description . "Kept with the decision")))
       (force . ((type . "boolean") (default . :json-false) (description . "Apply even though the note changed since")))))
     ("check_schema" orsb-tool-check-schema
-     "Where the notes depart from the vault's own rules: a note in a folder that may not hold notes, a missing required property or section, a value outside its allowed set, a link to the wrong kind of note. Returns counts by rule and by type, and the violations (paged). Reads only; changes nothing."
+     "Where the notes depart from the vault's own rules: a note in a folder that may not hold notes, an id shared by two notes (the index only sees one of them), a missing required property or section, a value outside its allowed set, a link to the wrong kind of note. Returns counts by rule and by type, and the violations (paged). Reads only; changes nothing."
      ()
-     ((rule . ((type . "string") (description . "Only this rule: misplaced, untyped-folder, missing-property, bad-value, missing-section")))
+     ((rule . ((type . "string") (description . "Only this rule: misplaced, untyped-folder, duplicate-id, missing-property, bad-value, missing-section")))
       (type . ((type . "string") (description . "Only notes of this type")))
       (path . ((type . "string") (description . "Only notes under this folder, e.g. projects/")))
       (limit . ((type . "integer") (default . 50)))

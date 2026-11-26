@@ -609,12 +609,20 @@ For a file node the body starts after the file-level drawer and the
           (while (and (not (eobp)) (looking-at "^[ \t]*$")) (forward-line 1))
           (cons (point) (point-max)))
       (org-back-to-heading t)
-      (end-of-line)
-      (forward-line 1)
-      (when (looking-at "^[ \t]*:PROPERTIES:")
-        (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-          (forward-line 1)))
-      (cons (point) (save-excursion (org-end-of-subtree t t) (point))))))
+      ;; The end is taken from the heading itself.  Taking it after stepping
+      ;; onto the next line was wrong for a heading with an empty body: that
+      ;; line is the NEXT heading, so the bounds became the next section's,
+      ;; and an append landed in it and a replace deleted it.
+      (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+        (end-of-line)
+        (if (eobp)
+            ;; a heading that ends the buffer without a newline
+            (progn (insert "\n") (setq end (point)))
+          (forward-line 1))
+        (when (and (< (point) end) (looking-at "^[ \t]*:PROPERTIES:"))
+          (when (re-search-forward "^[ \t]*:END:[ \t]*$" end t)
+            (forward-line 1)))
+        (cons (min (point) end) end)))))
 
 (defun orsb-core-node-body (node)
   "Return NODE's body text (after its drawer/keywords), hidden lines stripped."

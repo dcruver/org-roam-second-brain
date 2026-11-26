@@ -192,6 +192,9 @@ As of %DATE%.
                              (orsb-schema-test--note "b-wrong" "STATUS" "draft" "IDEA" "[[id:p-good][Good]]"))
     (orsb-schema-test--write root "projects/blog/dangling.org"
                              (orsb-schema-test--note "b-dangling" "STATUS" "active" "IDEA" "nowhere"))
+    ;; two notes with one id: org-roam would only ever see one of them
+    (orsb-schema-test--write root "projects/twin-a.org" (orsb-schema-test--note "twin" "STATUS" "done" "NEXT-ACTION" "x"))
+    (orsb-schema-test--write root "projects/twin-b.org" (orsb-schema-test--note "twin" "STATUS" "done" "NEXT-ACTION" "x"))
     ;; never looked at
     (orsb-schema-test--write root "archive/old.org" "#+title: old\n")
     (orsb-schema-test--write root "projects/x.sync-conflict-1.org" "#+title: conflict\n")
@@ -200,7 +203,9 @@ As of %DATE%.
                  (mapcar (lambda (v) (cons (alist-get 'rule v) (alist-get 'detail v)))
                          (seq-filter (lambda (v) (equal (alist-get 'file v) file))
                                      (alist-get 'violations report))))))
-      (should (= (alist-get 'notes report) 9))
+      (should (= (alist-get 'notes report) 11))
+      (should (equal (funcall of "projects/twin-a.org") '(("duplicate-id" . "twin (also in projects/twin-b.org)"))))
+      (should (equal (mapcar #'car (funcall of "projects/twin-b.org")) '("duplicate-id")))
       (should-not (funcall of "projects/good.org"))
       (should-not (funcall of "projects/2026/sub.org"))
       (should-not (funcall of "projects/ideas/seed.org"))
@@ -213,7 +218,7 @@ As of %DATE%.
       (should (equal (mapcar #'car (funcall of "misc/thing.org")) '("untyped-folder")))
       (should (equal (funcall of "projects/blog/wrong.org") '(("bad-value" . "IDEA: links to a project, not a idea"))))
       (should (equal (mapcar #'car (funcall of "projects/blog/dangling.org")) '("bad-value" "bad-value")))
-      (should (= (alist-get 'with_violations report) 5))
+      (should (= (alist-get 'with_violations report) 7))
       (should (equal (cdr (assoc "blog" (alist-get 'by_type report))) 3))
       (should (equal (cdr (assoc "bad-value" (alist-get 'by_rule report))) 4)))))
 
