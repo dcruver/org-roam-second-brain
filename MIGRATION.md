@@ -38,6 +38,16 @@
   `blog_enabled`. It returns `types`, `schema_files` and `enforce`.
 - **New tools:** `check_schema`, `get_proposals`, `decide_proposal`; every
   write tool takes `propose` and `reason`. Twenty-two tools in all.
+- **Keyboard commands.** `sb/person`, `sb/project`, `sb/idea` and `sb/admin`
+  are replaced by `sb/new` (`C-c b n`), which offers the vault's types.
+  `sb/projects`, `sb/people` and `sb/ideas` are replaced by `sb/list`
+  (`C-c b l`); `sb/followups`, `sb/dangling` and `sb/weekly` are gone;
+  `sb/open` (`C-c b o`) lists unfinished notes and `sb/proposals`
+  (`C-c b A`) the changes waiting for approval. `sb/directories` and
+  `sb/stale-days` are gone (`orsb-stale-days` is the one setting).
+- **Blog commands moved** to the optional `orsb-blog.el`: `(require
+  'orsb-blog)` and set `orsb-blog-directory` (and
+  `orsb-blog-idea-directory`) to vault folders.
 - **`orsb-agenda-directories`** is a list of vault folders, not of types, and
   is empty by default.
 - **`orsb-core-create-node`** is `(TITLE &rest ARGS)` with `:dir`, `:drawer`,

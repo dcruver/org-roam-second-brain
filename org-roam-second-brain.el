@@ -22,6 +22,8 @@
 (require 'org-roam)
 (require 'org-roam-vector-search)
 (require 'orsb-core)
+(require 'orsb-schema)
+(require 'orsb-tools)
 (require 'json)
 (require 'subr-x)
 (require 'cl-lib)
@@ -34,11 +36,6 @@
   "Second Brain for org-roam."
   :group 'org-roam
   :prefix "sb/")
-
-(defcustom sb/stale-days 5
-  "Number of days without activity before a project is considered stale."
-  :type 'integer
-  :group 'sb)
 
 (defcustom sb/similarity-threshold 0.6
   "Minimum similarity score for link suggestions.
@@ -59,17 +56,6 @@ Disabled by default as it makes an API call on every file open."
   :type 'boolean
   :group 'sb)
 
-(defcustom sb/directories
-  '((person . "people")
-    (project . "projects")
-    (idea . "ideas")
-    (admin . "admin")
-    (blog . "blog"))
-  "Subdirectories for each node type.
-Alist mapping node type symbols to subdirectory names under `org-roam-directory'."
-  :type '(alist :key-type symbol :value-type string)
-  :group 'sb)
-
 (defcustom sb/digest-buffer-name "*Second Brain Digest*"
   "Name of the buffer for displaying the daily digest."
   :type 'string
@@ -78,24 +64,6 @@ Alist mapping node type symbols to subdirectory names under `org-roam-directory'
 (defcustom sb/suggestions-buffer-name "*Link Suggestions*"
   "Name of the buffer for displaying link suggestions."
   :type 'string
-  :group 'sb)
-
-(defcustom sb/hugo-base-dir nil
-  "Hugo site directory the blog commands export to; nil disables them."
-  :type '(choice (const :tag "Not configured" nil) directory)
-  :group 'sb)
-
-(defcustom sb/hugo-sections nil
-  "Hugo sections offered by the blog commands."
-  :type '(repeat string)
-  :group 'sb)
-
-(defcustom sb/blog-llm-function nil
-  "Function to call for LLM operations in blog writing.
-Should accept (PROMPT CONTENT) and return generated text.
-If nil, AI functions will not be available."
-  :type '(choice (const :tag "Disabled" nil)
-                 (function :tag "LLM function"))
   :group 'sb)
 
 (defcustom sb/daily-auto-link-mode 'first-only
@@ -138,26 +106,6 @@ If nil, AI functions will not be available."
 ;;; ============================================================================
 ;;; INTERNAL HELPERS
 ;;; ============================================================================
-
-(defun sb/--ensure-directory (type)
-  "Ensure subdirectory for TYPE exists, return the path."
-  (let* ((subdir (cdr (assoc type sb/directories)))
-         (dir (expand-file-name (or subdir "") org-roam-directory)))
-    (unless (file-exists-p dir)
-      (make-directory dir t))
-    dir))
-
-(defun sb/--generate-id ()
-  "Generate a unique ID for new notes."
-  (format "%s" (time-convert nil 'integer)))
-
-(defun sb/--create-filepath (title type)
-  "Create filepath for a note with TITLE of TYPE."
-  (let* ((dir (sb/--ensure-directory type))
-         (id (sb/--generate-id))
-         (slug (downcase (replace-regexp-in-string "[^a-zA-Z0-9]+" "-" title)))
-         (filename (format "%s-%s.org" slug id)))
-    (expand-file-name filename dir)))
 
 (defun sb/--extract-properties (file)
   "Extract org properties from FILE as alist."
@@ -279,198 +227,6 @@ If nil, AI functions will not be available."
 ;;; CORE FUNCTIONS (return elisp data structures)
 ;;; ============================================================================
 
-(defun sb/core-create-node (type title properties &optional content)
-  "Create a node of TYPE with TITLE and PROPERTIES.
-PROPERTIES is an alist of additional properties to set.
-CONTENT is optional body text for the note.
-Returns the created node's ID and filepath."
-  (let* ((filepath (sb/--create-filepath title type))
-         (id (org-id-new))
-         (timestamp (format-time-string "[%Y-%m-%d %a]")))
-
-    (with-current-buffer (find-file-noselect filepath)
-      (org-mode)
-      (erase-buffer)
-      ;; Properties drawer
-      (insert ":PROPERTIES:\n")
-      (insert (format ":ID: %s\n" id))
-      (insert (format ":NODE-TYPE: %s\n" type))
-      (dolist (prop properties)
-        (when (cdr prop)
-          (insert (format ":%s: %s\n" (upcase (car prop)) (cdr prop)))))
-      (insert ":END:\n")
-      (insert (format "#+title: %s\n\n" title))
-      ;; Content
-      (when content
-        (insert content))
-      (save-buffer)
-      (kill-buffer (current-buffer)))
-
-    ;; Sync database
-    (org-roam-db-sync)
-
-    ;; Generate embeddings
-    (sb/--generate-embedding filepath)
-
-    ;; Return result
-    (list :id id :file filepath :title title :type type)))
-
-(defun sb/core-ensure-person (name)
-  "Ensure a person node exists for NAME, create minimal if not.
-Returns the node ID (existing or newly created)."
-  (let ((existing (sb/--node-exists-p name)))
-    (if existing
-        (org-roam-node-id existing)
-      ;; Create minimal person node
-      (let ((result (sb/core-create-node 'person name nil)))
-        (plist-get result :id)))))
-
-(defun sb/core-nodes-by-type (type)
-  "Get all nodes of TYPE.
-Returns list of plists with :node, :file, :title, :properties."
-  (let ((results '())
-        (seen-files (make-hash-table :test 'equal)))
-    (dolist (node (org-roam-node-list))
-      ;; Only file-level nodes (level 0)
-      (when (= (org-roam-node-level node) 0)
-        (let* ((file (org-roam-node-file node)))
-          (unless (gethash file seen-files)
-            (let* ((props (sb/--extract-properties file))
-                   (node-type (cdr (assoc "node-type" props))))
-              (when (and node-type (string= (downcase node-type) (symbol-name type)))
-                (puthash file t seen-files)
-                (push (list :node node
-                            :file file
-                            :title (org-roam-node-title node)
-                            :properties props)
-                      results)))))))
-    (nreverse results)))
-
-(defun sb/core-active-projects ()
-  "Get active projects sorted by last modified.
-Returns list of plists with project details."
-  (let* ((projects (sb/core-nodes-by-type 'project))
-         (active (seq-filter
-                  (lambda (p)
-                    (let ((status (cdr (assoc "status" (plist-get p :properties)))))
-                      (and status (string= (downcase status) "active"))))
-                  projects)))
-    (mapcar
-     (lambda (p)
-       (let* ((file (plist-get p :file))
-              (props (plist-get p :properties))
-              (next-action (cdr (assoc "next-action" props)))
-              (unchecked (sb/--extract-unchecked-items file "Next Actions"))
-              (days-ago (sb/--file-modified-days-ago file)))
-         (list :id (org-roam-node-id (plist-get p :node))
-               :title (plist-get p :title)
-               :file file
-               :status "active"
-               :next-action next-action
-               :unchecked-actions unchecked
-               :days-since-modified (round (or days-ago 0)))))
-     active)))
-
-(defun sb/core-stale-projects (&optional days)
-  "Get projects with no activity in DAYS days (default `sb/stale-days').
-Returns list of plists with project details."
-  (let* ((threshold (or days sb/stale-days))
-         (projects (sb/core-nodes-by-type 'project))
-         (active (seq-filter
-                  (lambda (p)
-                    (let ((status (cdr (assoc "status" (plist-get p :properties)))))
-                      (and status
-                           (not (string= (downcase status) "done"))
-                           (not (string= (downcase status) "someday")))))
-                  projects))
-         (stale (seq-filter
-                 (lambda (p)
-                   (let ((days-ago (sb/--file-modified-days-ago (plist-get p :file))))
-                     (and days-ago (>= days-ago threshold))))
-                 active)))
-    (mapcar
-     (lambda (p)
-       (let* ((file (plist-get p :file))
-              (props (plist-get p :properties)))
-         (list :id (org-roam-node-id (plist-get p :node))
-               :title (plist-get p :title)
-               :file file
-               :status (cdr (assoc "status" props))
-               :next-action (cdr (assoc "next-action" props))
-               :days-since-modified (round (sb/--file-modified-days-ago file)))))
-     stale)))
-
-(defun sb/core-pending-followups ()
-  "Get people with unchecked follow-up items in notes that link to them.
-Returns list of plists with person and followup details."
-  (let* ((people (sb/core-nodes-by-type 'person))
-         (with-followups
-          (seq-filter
-           (lambda (p)
-             (let* ((node (plist-get p :node))
-                    (name (plist-get p :title))
-                    (backlink-ids (sb/--get-backlink-ids node))
-                    (followups '()))
-               ;; Check each backlinking note for unchecked items mentioning this person
-               (dolist (source-id backlink-ids)
-                 (when-let* ((source-node (org-roam-node-from-id source-id))
-                             (source-file (org-roam-node-file source-node)))
-                   (with-temp-buffer
-                     (insert-file-contents source-file)
-                     (goto-char (point-min))
-                     (while (re-search-forward "^[ \t]*- \\[ \\] \\(.*\\)$" nil t)
-                       (let ((item-text (match-string 1)))
-                         (when (string-match-p (regexp-quote name) item-text)
-                           (push (string-trim item-text) followups)))))))
-               (> (length followups) 0)))
-           people)))
-    (mapcar
-     (lambda (p)
-       (let* ((node (plist-get p :node))
-              (name (plist-get p :title))
-              (backlink-ids (sb/--get-backlink-ids node))
-              (followups '()))
-         ;; Collect followups
-         (dolist (source-id backlink-ids)
-           (when-let* ((source-node (org-roam-node-from-id source-id))
-                       (source-file (org-roam-node-file source-node)))
-             (with-temp-buffer
-               (insert-file-contents source-file)
-               (goto-char (point-min))
-               (while (re-search-forward "^[ \t]*- \\[ \\] \\(.*\\)$" nil t)
-                 (let ((item-text (match-string 1)))
-                   (when (string-match-p (regexp-quote name) item-text)
-                     (push (string-trim item-text) followups)))))))
-         (list :id (org-roam-node-id node)
-               :name name
-               :file (plist-get p :file)
-               :backlink-count (length backlink-ids)
-               :followups (nreverse followups)
-               :followup-count (length followups))))
-     with-followups)))
-
-(defun sb/core-dangling-person-links ()
-  "Find [[Name]] links in unchecked items where the person node doesn't exist.
-Returns list of plists with name, item text, and source file."
-  (let ((dangling '())
-        (seen-names (make-hash-table :test 'equal)))
-    (dolist (file (directory-files-recursively org-roam-directory "\\.org$"))
-      (with-temp-buffer
-        (insert-file-contents file)
-        (goto-char (point-min))
-        (while (re-search-forward "^[ \t]*- \\[ \\] \\(.*\\[\\[.+\\]\\].*\\)$" nil t)
-          (let* ((item-text (match-string 1))
-                 (names (sb/--extract-link-names item-text)))
-            (dolist (name names)
-              (unless (or (gethash name seen-names)
-                          (sb/--node-exists-p name))
-                (puthash name t seen-names)
-                (push (list :name name
-                            :item (string-trim item-text)
-                            :file file)
-                      dangling)))))))
-    (nreverse dangling)))
-
 (defun sb/core-unlinked-similar (file &optional threshold)
   "Find notes similar to FILE that aren't already linked.
 Returns list of plists with file, title, and similarity."
@@ -519,25 +275,6 @@ Returns list of plists with file, title, and similarity."
                    :similarity similarity)))
          unlinked)))))
 
-(defun sb/core-digest-data ()
-  "Gather all data for daily digest.
-Returns plist with all digest information."
-  (let ((active (sb/core-active-projects))
-        (followups (sb/core-pending-followups))
-        (stale (sb/core-stale-projects))
-        (dangling (sb/core-dangling-person-links))
-        (blog (sb/core-blog-digest-data)))
-    (list :generated-at (format-time-string "%Y-%m-%d %H:%M:%S")
-          :active-projects (list :total (length active)
-                                 :top-3 (seq-take active 3))
-          :pending-followups (list :total (length followups)
-                                   :people followups)
-          :stale-projects (list :total (length stale)
-                                :projects stale)
-          :dangling-links (list :total (length dangling)
-                                :items (seq-take dangling 5))
-          :blog blog)))
-
 (defun sb/core-daily-related-notes (file &optional threshold)
   "Find notes related to daily FILE for auto-linking.
 Returns plist with :concepts and :dailies lists, each containing
@@ -578,197 +315,6 @@ Returns plist with :concepts and :dailies lists, each containing
             :dailies (seq-take (nreverse dailies) sb/daily-max-daily-links)))))
 
 ;;; ============================================================================
-;;; BLOG POST FUNCTIONS
-;;; ============================================================================
-
-(defun sb/--blog-template (title section)
-  "Generate blog post template for TITLE in SECTION."
-  (format "* Outline
-- [ ] Introduction
-- [ ] Main points
-- [ ] Conclusion
-
-* Draft
-
-* Research
-"))
-
-(defun sb/core-create-blog (title section &optional slug)
-  "Create a blog post node with TITLE for SECTION.
-SLUG is optional; if nil, generated from title.
-Returns plist with :id, :file, :title, :section, :slug."
-  (unless sb/hugo-base-dir
-    (user-error "Set `sb/hugo-base-dir' to use the blog commands"))
-  (let* ((slug (or slug (orsb-core--slug title)))
-         (node (orsb-core-create-node
-                title
-                :dir (expand-file-name (alist-get 'blog sb/directories) org-roam-directory)
-                :drawer `(("STATUS" . "draft")
-                          ("EXPORT_FILE_NAME" . ,slug)
-                          ("EXPORT_HUGO_SECTION" . ,(format "%s/posts" section)))
-                :keywords `(("date" . ,(format-time-string "[%Y-%m-%d %a]"))
-                            ("hugo_base_dir" . ,sb/hugo-base-dir)
-                            ("hugo_draft" . "true")
-                            ("hugo_categories" . ,(capitalize (replace-regexp-in-string "-" " " section))))
-                :body (sb/--blog-template title section))))
-    (list :id (org-roam-node-id node) :file (org-roam-node-file node)
-          :title title :section section :slug slug)))
-
-(defun sb/core-blog-posts (&optional draft-filter)
-  "Get all blog posts, optionally filtered by draft status.
-DRAFT-FILTER can be:
-  nil     - return all posts
-  'draft  - return only drafts
-  'published - return only published posts
-Returns list of plists with post details."
-  (let ((posts (sb/core-nodes-by-type 'blog)))
-    (when draft-filter
-      (setq posts
-            (seq-filter
-             (lambda (p)
-               (let* ((file (plist-get p :file))
-                      (is-draft (sb/--blog-is-draft file)))
-                 (if (eq draft-filter 'draft)
-                     is-draft
-                   (not is-draft))))
-             posts)))
-    (mapcar
-     (lambda (p)
-       (let* ((file (plist-get p :file))
-              (props (plist-get p :properties))
-              (section (cdr (assoc "export_hugo_section" props)))
-              (days-ago (sb/--file-modified-days-ago file)))
-         (list :id (org-roam-node-id (plist-get p :node))
-               :title (plist-get p :title)
-               :file file
-               :section section
-               :draft (sb/--blog-is-draft file)
-               :days-since-modified (round (or days-ago 0)))))
-     posts)))
-
-(defun sb/--blog-is-draft (file)
-  "Check if blog FILE is marked as draft."
-  (when (and file (file-exists-p file))
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (if (re-search-forward "^#\\+hugo_draft:\\s-*\\(true\\|false\\)" nil t)
-          (string= (match-string 1) "true")
-        t))))  ; Default to draft if not specified
-
-(defun sb/--blog-set-draft-value (file value)
-  "Set draft status in blog FILE to VALUE (t or nil)."
-  (when (and file (file-exists-p file))
-    (with-current-buffer (find-file-noselect file)
-      (goto-char (point-min))
-      (if (re-search-forward "^#\\+hugo_draft:\\s-*\\(true\\|false\\)" nil t)
-          (replace-match (format "#+hugo_draft: %s" (if value "true" "false")))
-        ;; Insert if not found
-        (goto-char (point-min))
-        (when (re-search-forward "^#\\+date:" nil t)
-          (end-of-line)
-          (insert (format "\n#+hugo_draft: %s" (if value "true" "false")))))
-      (save-buffer))))
-
-(defun sb/--blog-get-property (file property)
-  "Get PROPERTY value from blog FILE."
-  (when (and file (file-exists-p file))
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (when (re-search-forward (format "^:%s:\\s-*\\(.+\\)$"
-                                       (upcase property)) nil t)
-        (string-trim (match-string 1))))))
-
-(defun sb/--blog-validate (file)
-  "Validate blog FILE has required properties for publishing.
-Returns nil if valid, or a string describing the issue."
-  (let ((export-file-name (sb/--blog-get-property file "EXPORT_FILE_NAME"))
-        (export-section (sb/--blog-get-property file "EXPORT_HUGO_SECTION")))
-    (cond
-     ((not export-file-name) "Missing EXPORT_FILE_NAME property")
-     ((not export-section) "Missing EXPORT_HUGO_SECTION property")
-     ((not (member (car (split-string export-section "/"))
-                   sb/hugo-sections))
-      (format "Invalid section: %s" export-section))
-     (t nil))))
-
-(defun sb/--blog-has-content (file)
-  "Check if blog FILE has substantial content beyond template."
-  (when (and file (file-exists-p file))
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      ;; Look for Draft section with content
-      (when (re-search-forward "^\\* Draft" nil t)
-        (let ((start (point)))
-          (if (re-search-forward "^\\* " nil t)
-              (> (- (match-beginning 0) start) 50)
-            (> (- (point-max) start) 50)))))))
-
-(defun sb/--blog-outline-progress (file)
-  "Get outline progress for blog FILE as (completed . total)."
-  (when (and file (file-exists-p file))
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (let ((checked 0) (unchecked 0))
-        (when (re-search-forward "^\\* Outline" nil t)
-          (let ((end (save-excursion
-                       (if (re-search-forward "^\\* " nil t)
-                           (match-beginning 0)
-                         (point-max)))))
-            (while (re-search-forward "^- \\[\\(.\\)\\]" end t)
-              (if (string= (match-string 1) "X")
-                  (cl-incf checked)
-                (cl-incf unchecked)))))
-        (cons checked (+ checked unchecked))))))
-
-(defun sb/core-blog-digest-data ()
-  "Gather blog-related data for daily digest.
-Returns plist with :drafts, :unpublished, and :ideas-for-blog."
-  (let* ((all-posts (sb/core-blog-posts))
-         (drafts (seq-filter (lambda (p) (plist-get p :draft)) all-posts))
-         (published (seq-filter (lambda (p) (not (plist-get p :draft))) all-posts))
-         (ideas (sb/core-nodes-by-type 'idea)))
-    ;; Enrich drafts with progress info
-    (setq drafts
-          (mapcar (lambda (d)
-                    (let* ((file (plist-get d :file))
-                           (progress (sb/--blog-outline-progress file))
-                           (has-content (sb/--blog-has-content file)))
-                      (append d (list :progress progress
-                                      :has-content has-content))))
-                  drafts))
-    ;; Filter ideas that could make good blog posts (have interesting titles)
-    ;; Exclude ideas that already have a blog post with similar title
-    (let ((blog-titles (mapcar (lambda (p) (downcase (plist-get p :title))) all-posts)))
-      (setq ideas
-            (seq-filter
-             (lambda (idea)
-               (let* ((title (plist-get idea :title))
-                      (title-lower (downcase title)))
-                 ;; Keep ideas that:
-                 ;; 1. Don't already have a matching blog post
-                 ;; 2. Have a title longer than 10 chars (meaningful)
-                 (and (> (length title) 10)
-                      (not (member title-lower blog-titles))
-                      ;; Check for idea-like titles (opinions, insights)
-                      (or (string-match-p "\\b\\(why\\|how\\|what\\|the\\)\\b" title-lower)
-                          (> (length title) 30)))))
-             ideas)))
-    (list :drafts (list :total (length drafts)
-                        :items drafts)
-          :published (list :total (length published)
-                           :recent (seq-take
-                                    (seq-sort-by (lambda (p)
-                                                   (plist-get p :days-since-modified))
-                                                 #'< published)
-                                    3))
-          :ideas-for-blog (list :total (length ideas)
-                                :items (seq-take ideas 5)))))
-
-;;; ============================================================================
 ;;; BUFFER MODE (for digest and suggestions displays)
 ;;; ============================================================================
 
@@ -780,7 +326,8 @@ Returns plist with :drafts, :unpublished, and :ideas-for-blog."
     (define-key map (kbd "g") 'sb/buffer-refresh)
     (define-key map (kbd "q") 'quit-window)
     (define-key map (kbd "i") 'sb/buffer-insert-link)
-    (define-key map (kbd "c") 'sb/buffer-create-person)
+    (define-key map (kbd "a") 'sb/proposal-approve)
+    (define-key map (kbd "r") 'sb/proposal-reject)
     (define-key map (kbd "x") 'sb/buffer-dismiss-item)
     map)
   "Keymap for `sb/buffer-mode'.")
@@ -803,7 +350,8 @@ Returns plist with :drafts, :unpublished, and :ideas-for-blog."
     (kbd "gr") 'sb/buffer-refresh
     (kbd "q") 'quit-window
     (kbd "yi") 'sb/buffer-insert-link
-    (kbd "c") 'sb/buffer-create-person))
+    (kbd "a") 'sb/proposal-approve
+    (kbd "r") 'sb/proposal-reject))
 
 (defvar-local sb/buffer-items nil
   "List of items in the current buffer for navigation.")
@@ -834,44 +382,10 @@ Returns plist with :drafts, :unpublished, and :ideas-for-blog."
       (when (get-text-property (point) 'sb-item)
         (sb/--highlight-current-item)))))
 
-(defun sb/buffer-visit-item ()
-  "Visit the item at point."
-  (interactive)
-  ;; Search for property anywhere on current line
-  (let ((item (or (get-text-property (point) 'sb-item)
-                  (get-text-property (line-beginning-position) 'sb-item)
-                  (save-excursion
-                    (beginning-of-line)
-                    (let ((eol (line-end-position)))
-                      (catch 'found
-                        (while (< (point) eol)
-                          (when-let ((it (get-text-property (point) 'sb-item)))
-                            (throw 'found it))
-                          (forward-char 1))
-                        nil))))))
-    (if item
-        (let ((file (plist-get item :file))
-              (id (plist-get item :id)))
-          (cond
-           (file (find-file file))
-           (id (org-roam-id-open id nil))
-           (t (message "No file or ID for this item"))))
-      (message "No item on this line"))))
-
 (defun sb/buffer-refresh ()
   "Refresh the current buffer."
   (interactive)
   (sb/buffer-do-refresh nil nil))
-
-(defun sb/buffer-do-refresh (_ignore-auto _noconfirm)
-  "Actual refresh implementation."
-  (pcase sb/buffer-type
-    ('digest (sb/digest))
-    ('suggestions (sb/suggest-links sb/buffer-source-file))
-    ('followups (sb/followups))
-    ('stale (sb/stale))
-    ('dangling (sb/dangling))
-    (_ (message "Unknown buffer type, can't refresh"))))
 
 (defun sb/buffer-insert-link ()
   "Insert a link to the item at point into the kill ring."
@@ -884,16 +398,6 @@ Returns plist with :drafts, :unpublished, and :ideas-for-blog."
             (kill-new (format "[[id:%s][%s]]" id title))
             (message "Copied link to %s" title))
         (message "No ID for this item")))))
-
-(defun sb/buffer-create-person ()
-  "Create a person node for the dangling link at point."
-  (interactive)
-  (when-let ((item (get-text-property (point) 'sb-item)))
-    (let ((name (plist-get item :name)))
-      (when name
-        (sb/core-ensure-person name)
-        (message "Created person node for %s" name)
-        (sb/buffer-refresh)))))
 
 (defun sb/buffer-dismiss-item ()
   "Dismiss the item at point (remove from view, not from data)."
@@ -916,320 +420,298 @@ Returns plist with :drafts, :unpublished, and :ideas-for-blog."
     (put-text-property start (point) 'sb-item item)))
 
 ;;; ============================================================================
-;;; INTERACTIVE COMMANDS
+;;; COMMANDS THAT KNOW NO NOTE TYPES
 ;;; ============================================================================
+;; Everything here asks the vault what kinds of note it has (its _schema.org
+;; files, through `orsb-schema') and goes through the same tool functions the
+;; MCP server uses, so a note made from the keyboard obeys the same rules as
+;; one made by an agent.
+
+(defun sb/--call (fn args)
+  "Call the tool function FN with ARGS; return its data.
+A refusal becomes a `user-error'; rules broken in warn mode are shown."
+  (let ((orsb-tools--warnings nil))
+    (condition-case err
+        (prog1 (funcall fn args)
+          (when orsb-tools--warnings
+            (message "Note rules: %s" (string-join orsb-tools--warnings "; "))))
+      (orsb-error (user-error "%s" (nth 2 err))))))
+
+(defun sb/--items (data key)
+  "The items of the section KEY of the review DATA, as a list."
+  (append (alist-get 'items (alist-get key data)) nil))
+
+(defun sb/--type-names ()
+  "The note types this vault defines; \"note\" alone when it defines none."
+  (or (mapcar (lambda (e) (alist-get 'type e)) (and (orsb-schema-present-p) (orsb-schema-tree)))
+      '("note")))
+
+(defun sb/--ask-p (row)
+  "Non-nil when the schema property ROW has to be asked for on creation.
+Required, with no default, and not something the server fills in."
+  (let ((form (downcase (string-trim (or (nth 2 row) "")))))
+    (and (orsb-schema--yes (nth 1 row))
+         (string-empty-p (or (nth 3 row) ""))
+         (not (string= form "id"))
+         (not (string-match-p "set by the server" form)))))
+
+(defun sb/--read-property (row schema)
+  "Read a value for the schema property ROW of SCHEMA from the minibuffer."
+  (let* ((name (car row))
+         (form (string-trim (or (nth 2 row) "")))
+         (f (downcase form))
+         (prompt (format "%s%s: " name (if (string-empty-p form) "" (format " (%s)" form)))))
+    (cond
+     ((string-prefix-p "one of " f)
+      (let ((rest (string-trim (substring form 7))))
+        (completing-read prompt (split-string (or (orsb-schema-get schema (upcase rest)) rest) "[ ,]+" t) nil t)))
+     ((string-prefix-p "date" f)
+      (format "[%s]" (org-read-date nil nil nil prompt)))
+     ((string-prefix-p "link" f)
+      (let ((node (org-roam-node-read nil nil nil t prompt)))
+        (format "[[id:%s][%s]]" (org-roam-node-id node) (org-roam-node-title node))))
+     (t (read-string prompt)))))
 
 ;;;###autoload
-(defun sb/person (name &optional context)
-  "Create a person node for NAME with optional CONTEXT.
-When called interactively, prompts for name and context."
-  (interactive "sPerson name: \nsContext (how do you know them?): ")
-  (let* ((props (when (and context (not (string-empty-p context)))
-                  (list (cons "context" context)
-                        (cons "last-contact" (format-time-string "[%Y-%m-%d %a]")))))
-         (content "* Follow-ups\n\n* Notes\n")
-         (result (sb/core-create-node 'person name props content)))
-    (find-file (plist-get result :file))
-    (message "Created person: %s" name)))
-
-;;;###autoload
-(defun sb/project (title &optional next-action)
-  "Create a project node for TITLE with optional NEXT-ACTION.
-When called interactively, prompts for title and next action."
-  (interactive "sProject title: \nsNext action: ")
-  (let* ((props (list (cons "status" "active")
-                      (when (and next-action (not (string-empty-p next-action)))
-                        (cons "next-action" next-action))))
-         (props (seq-filter #'identity props))
-         (content (format "* Next Actions\n%s\n* Notes\n"
-                          (if (and next-action (not (string-empty-p next-action)))
-                              (format "- [ ] %s\n" next-action)
-                            "")))
-         (result (sb/core-create-node 'project title props content)))
-    (find-file (plist-get result :file))
-    (message "Created project: %s" title)))
-
-;;;###autoload
-(defun sb/idea (title one-liner)
-  "Create an idea node for TITLE with ONE-LINER summary.
-When called interactively, prompts for both."
-  (interactive "sIdea title: \nsOne-liner (brief insight): ")
-  (let* ((props (list (cons "one-liner" one-liner)))
-         (content (format "* One-liner\n%s\n\n* Elaboration\n" one-liner))
-         (result (sb/core-create-node 'idea title props content)))
-    (find-file (plist-get result :file))
-    (message "Created idea: %s" title)))
-
-;;;###autoload
-(defun sb/admin (title &optional due-date)
-  "Create an admin task node for TITLE with optional DUE-DATE.
-When called interactively, prompts for both."
-  (interactive "sAdmin task: \nsDue date (YYYY-MM-DD, or empty): ")
-  (let* ((props (list (cons "status" "todo")
-                      (when (and due-date (not (string-empty-p due-date)))
-                        (cons "due-date" (format "[%s]" due-date)))))
-         (props (seq-filter #'identity props))
-         (content "* Notes\n")
-         (result (sb/core-create-node 'admin title props content)))
-    (find-file (plist-get result :file))
-    (message "Created admin task: %s" title)))
+(defun sb/new (type title)
+  "Create a note of TYPE titled TITLE and visit it.
+The types offered are the ones the vault defines.  The type's schema decides
+the folder, the starting sections and which properties are asked for."
+  (interactive
+   (let ((type (completing-read "New note of type: " (sb/--type-names) nil t)))
+     (list type (read-string (format "Title of the new %s: " type)))))
+  (let* ((schema (and (orsb-schema-present-p)
+                      (orsb-schema-for-directory (orsb-tools--type-directory type))))
+         (props (delq nil (mapcar (lambda (row)
+                                    (when (sb/--ask-p row)
+                                      (cons (intern (upcase (car row))) (sb/--read-property row schema))))
+                                  (alist-get 'properties schema))))
+         (args `((title . ,title) (node_type . ,type) (properties . ,props)))
+         (data (sb/--call #'orsb-tool-create-node args)))
+    (when (and (eq (alist-get 'created data) :json-false)
+               (y-or-n-p (format "A note titled \"%s\" exists. Create another? " title)))
+      (setq data (sb/--call #'orsb-tool-create-node (append args '((on_duplicate . "create"))))))
+    (if (eq (alist-get 'created data) t)
+        (find-file (expand-file-name (alist-get 'file data) org-roam-directory))
+      (when-let* ((dup (car (append (alist-get 'possible_duplicates data) nil)))
+                  (id (alist-get 'id dup)))
+        (org-roam-id-open id nil)))))
 
 ;;;###autoload
 (defun sb/inbox (text)
-  "Log TEXT to today's inbox, auto-creating person nodes for [[Name]] links."
+  "Add TEXT to today's inbox."
   (interactive "sInbox entry: ")
-  (let* ((today (format-time-string "%Y-%m-%d"))
-         (daily-file (expand-file-name (concat today ".org")
-                                       (expand-file-name "daily" org-roam-directory)))
-         (timestamp (format-time-string "[%Y-%m-%d %a %H:%M]"))
-         (link-names (sb/--extract-link-names text))
-         (created-people '()))
+  (sb/--call #'orsb-tool-log-to-inbox `((text . ,text)))
+  (message "Logged to inbox"))
 
-    ;; Auto-create person nodes
-    (dolist (name link-names)
-      (unless (sb/--node-exists-p name)
-        (sb/core-ensure-person name)
-        (push name created-people)))
+(defun sb/--record-line (r)
+  "One line for the note record R: type, title, status, next action, age."
+  (format "  [%s] %s%s%s%s"
+          (or (alist-get 'node_type r) "note")
+          (alist-get 'title r)
+          (if-let* ((st (alist-get 'status r))) (format "  (%s)" st) "")
+          (if-let* ((na (alist-get 'next_action r))) (format " -> %s" na) "")
+          (if-let* ((d (alist-get 'days_since_modified r))) (format "  %dd" d) "")))
 
-    ;; Ensure daily directory and file exist
-    (unless (file-exists-p (file-name-directory daily-file))
-      (make-directory (file-name-directory daily-file) t))
-    (unless (file-exists-p daily-file)
-      (with-temp-file daily-file
-        (insert (format "#+title: %s\n#+filetags: :daily:\n\n" today))))
+(defun sb/--record-item (r)
+  "The navigation item for the note record R."
+  (list :id (alist-get 'id r) :title (alist-get 'title r)))
 
-    ;; Add to inbox
-    (with-current-buffer (find-file-noselect daily-file)
-      (goto-char (point-min))
-      (if (re-search-forward "^\\* Inbox$" nil t)
-          (progn (end-of-line) (newline))
-        (goto-char (point-max))
-        (unless (bolp) (newline))
-        (insert "* Inbox\n"))
-      (insert (format "- %s %s\n" timestamp text))
-      (save-buffer))
-
-    (when created-people
-      (message "Logged to inbox. Created person nodes: %s"
-               (string-join (nreverse created-people) ", ")))
-    (unless created-people
-      (message "Logged to inbox"))))
+(defun sb/--show (buffer-name type title fill)
+  "Fill BUFFER-NAME, a `sb/buffer-mode' buffer of TYPE headed TITLE, by FILL."
+  (let ((buf (get-buffer-create buffer-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (sb/buffer-mode)
+        (setq sb/buffer-type type)
+        (insert (propertize (concat title "\n\n") 'face 'bold))
+        (funcall fill)
+        (insert "\nKeys: n/p move, RET open, g refresh, i copy link, q quit\n")
+        (goto-char (point-min))))
+    (display-buffer buf)))
 
 ;;;###autoload
 (defun sb/digest ()
-  "Display the daily digest in a dedicated buffer."
+  "Show what needs attention: unfinished and stale notes, due tasks, the inbox,
+and changes waiting for approval."
   (interactive)
-  (let ((data (sb/core-digest-data))
-        (buf (get-buffer-create sb/digest-buffer-name)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'digest)
-
-        ;; Header
-        (insert (propertize "Second Brain Daily Digest\n" 'face 'bold))
-        (insert (format "Generated: %s\n\n" (plist-get data :generated-at)))
-
-        ;; Active Projects
-        (let* ((projects (plist-get data :active-projects))
-               (total (plist-get projects :total))
-               (top-3 (plist-get projects :top-3)))
-          (insert (propertize (format "Active Projects (%d)\n" total) 'face 'bold))
-          (if (> total 0)
-              (dolist (p top-3)
-                (sb/--insert-item
-                 (format "  %s%s"
-                         (plist-get p :title)
-                         (if-let ((na (plist-get p :next-action)))
-                             (format " -> %s" na)
-                           ""))
-                 p 0))
-            (insert "  No active projects\n"))
-          (insert "\n"))
-
-        ;; Pending Follow-ups
-        (let* ((followups (plist-get data :pending-followups))
-               (total (plist-get followups :total))
-               (people (plist-get followups :people)))
-          (insert (propertize (format "Pending Follow-ups (%d people)\n" total) 'face 'bold))
-          (if (> total 0)
-              (dolist (p (seq-take people 5))
-                (sb/--insert-item
-                 (format "  %s: %s"
-                         (plist-get p :name)
-                         (or (car (plist-get p :followups)) ""))
-                 p 0))
-            (insert "  No pending follow-ups\n"))
-          (insert "\n"))
-
-        ;; Dangling Links
-        (let* ((dangling (plist-get data :dangling-links))
-               (total (plist-get dangling :total))
-               (items (plist-get dangling :items)))
-          (when (> total 0)
-            (insert (propertize (format "Untracked People (%d)\n" total) 'face 'bold))
-            (dolist (item items)
-              (sb/--insert-item
-               (format "  [[%s]] - %s"
-                       (plist-get item :name)
-                       (truncate-string-to-width (plist-get item :item) 50))
-               item 0))
-            (insert "  Press 'c' to create person nodes\n\n")))
-
-        ;; Stale Projects
-        (let* ((stale (plist-get data :stale-projects))
-               (total (plist-get stale :total))
-               (projects (plist-get stale :projects)))
-          (insert (propertize (format "Might Be Stuck (%d)\n" total) 'face 'bold))
-          (if (> total 0)
-              (dolist (p (seq-take projects 3))
-                (sb/--insert-item
-                 (format "  %s (%d days)"
-                         (plist-get p :title)
-                         (plist-get p :days-since-modified))
-                 p 0))
-            (insert "  All projects recently active\n"))
-          (insert "\n"))
-
-        ;; Blog Status
-        (let* ((blog (plist-get data :blog))
-               (drafts (plist-get blog :drafts))
-               (published (plist-get blog :published))
-               (ideas (plist-get blog :ideas-for-blog)))
-          (insert (propertize "Blog Status\n" 'face 'bold))
-          ;; Drafts in progress
-          (let ((draft-items (plist-get drafts :items)))
-            (if (> (length draft-items) 0)
-                (progn
-                  (insert (format "  Drafts (%d):\n" (plist-get drafts :total)))
-                  (dolist (d (seq-take draft-items 3))
-                    (let* ((progress (plist-get d :progress))
-                           (checked (car progress))
-                           (total-items (cdr progress))
-                           (has-content (plist-get d :has-content))
-                           (status (cond
-                                    ((and has-content (= checked total-items)) "ready to publish")
-                                    (has-content (format "%d/%d outline" checked total-items))
-                                    (t "needs content"))))
-                      (sb/--insert-item
-                       (format "    %s [%s]"
-                               (plist-get d :title)
-                               status)
-                       d 0))))
-              (insert "  No drafts in progress\n")))
-          ;; Recently published
-          (when-let ((recent (plist-get published :recent)))
-            (when (> (length recent) 0)
-              (insert (format "  Published (%d total):\n" (plist-get published :total)))
-              (dolist (p recent)
-                (sb/--insert-item
-                 (format "    %s (%d days ago)"
-                         (plist-get p :title)
-                         (plist-get p :days-since-modified))
-                 p 0))))
-          ;; Ideas that could be posts
-          (let ((idea-items (plist-get ideas :items)))
-            (when (> (length idea-items) 0)
-              (insert (format "  Ideas for posts (%d):\n" (plist-get ideas :total)))
-              (dolist (idea (seq-take idea-items 3))
-                (sb/--insert-item
-                 (format "    %s"
-                         (truncate-string-to-width (plist-get idea :title) 50))
-                 idea 0))))
-          (insert "\n"))
-
-        ;; Footer
-        (insert "\n")
-        (insert "Keys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (insert "      i=copy link, c=create person, x=dismiss\n")
-
-        (goto-char (point-min))))
-    (display-buffer buf)))
+  (let* ((data (sb/--call #'orsb-tool-get-review '((limit . 200))))
+         (open (sb/--items data 'open))
+         (stale (sb/--items data 'stale))
+         (tasks (sb/--items data 'due_tasks))
+         (inbox (sb/--items data 'inbox))
+         (pending (alist-get 'total (sb/--call #'orsb-tool-get-proposals nil))))
+    (sb/--show
+     sb/digest-buffer-name 'digest
+     (format "Second Brain digest, %s" (format-time-string "%Y-%m-%d %H:%M"))
+     (lambda ()
+       (insert (propertize (format "Unfinished (%d)\n" (length open)) 'face 'bold))
+       (if open
+           (dolist (r (seq-take open 12)) (sb/--insert-item (sb/--record-line r) (sb/--record-item r) 0))
+         (insert (if (orsb-schema-present-p)
+                     "  Nothing open.\n"
+                   "  This vault has no _schema.org files, so no note type has a lifecycle.\n")))
+       (insert "\n" (propertize (format "Stale, untouched for %d days or more (%d)\n" orsb-stale-days (length stale)) 'face 'bold))
+       (dolist (r (seq-take stale 12)) (sb/--insert-item (sb/--record-line r) (sb/--record-item r) 0))
+       (insert "\n" (propertize (format "Tasks due within 3 days (%d)\n" (length tasks)) 'face 'bold))
+       (dolist (tk (seq-take tasks 12))
+         (sb/--insert-item (format "  %s%s  (%s)"
+                                   (or (alist-get 'text tk) (alist-get 'heading tk) "")
+                                   (if (alist-get 'overdue tk) "  OVERDUE" "")
+                                   (or (alist-get 'title tk) ""))
+                           (list :id (or (alist-get 'heading_id tk) (alist-get 'id tk)) :title (alist-get 'title tk))
+                           0))
+       (insert "\n" (propertize (format "Inbox (%d open)\n" (length inbox)) 'face 'bold))
+       (dolist (e (seq-take inbox 8)) (insert (format "  %s\n" (alist-get 'text e))))
+       (insert "\n" (propertize (format "Waiting for approval: %d" pending) 'face 'bold)
+               (if (> pending 0) "   (M-x sb/proposals)\n" "\n"))))))
 
 ;;;###autoload
-(defun sb/followups ()
-  "Display all pending follow-ups."
+(defun sb/open ()
+  "List every unfinished note: any type whose schema declares a lifecycle."
   (interactive)
-  (let ((data (sb/core-pending-followups))
-        (buf (get-buffer-create "*Follow-ups*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'followups)
-
-        (insert (propertize "Pending Follow-ups\n\n" 'face 'bold))
-
-        (if data
-            (dolist (p data)
-              (insert (propertize (format "%s\n" (plist-get p :name)) 'face 'bold))
-              (dolist (followup (plist-get p :followups))
-                (sb/--insert-item (format "  - [ ] %s" followup) p 0))
-              (insert "\n"))
-          (insert "No pending follow-ups.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open person, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
+  (let ((open (sb/--items (sb/--call #'orsb-tool-get-review '((limit . 1000))) 'open)))
+    (sb/--show "*Second Brain: unfinished*" 'open (format "Unfinished notes (%d)" (length open))
+               (lambda ()
+                 (dolist (r open) (sb/--insert-item (sb/--record-line r) (sb/--record-item r) 0))))))
 
 ;;;###autoload
 (defun sb/stale ()
-  "Display stale projects."
+  "List unfinished notes nobody has touched for `orsb-stale-days' days."
   (interactive)
-  (let ((data (sb/core-stale-projects))
-        (buf (get-buffer-create "*Stale Projects*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'stale)
+  (let ((stale (sb/--items (sb/--call #'orsb-tool-get-review '((limit . 1000))) 'stale)))
+    (sb/--show "*Second Brain: stale*" 'stale
+               (format "Stale notes, untouched for %d days or more (%d)" orsb-stale-days (length stale))
+               (lambda ()
+                 (dolist (r stale) (sb/--insert-item (sb/--record-line r) (sb/--record-item r) 0))))))
 
-        (insert (propertize (format "Stale Projects (>%d days)\n\n" sb/stale-days) 'face 'bold))
-
-        (if data
-            (dolist (p data)
-              (sb/--insert-item
-               (format "%s - %d days%s"
-                       (plist-get p :title)
-                       (plist-get p :days-since-modified)
-                       (if-let ((na (plist-get p :next-action)))
-                           (format " [%s]" na)
-                         ""))
-               p 0))
-          (insert "No stale projects. All actively maintained.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
+(defvar-local sb/buffer-list-type nil
+  "The note type a `sb/list' buffer shows.")
 
 ;;;###autoload
-(defun sb/dangling ()
-  "Display dangling person links (untracked people)."
+(defun sb/list (type)
+  "List the notes of TYPE, one of the types the vault defines."
+  (interactive (list (completing-read "List notes of type: " (sb/--type-names) nil t)))
+  (let ((nodes (append (alist-get 'nodes (sb/--call #'orsb-tool-list-nodes `((node_type . ,type) (limit . 1000)))) nil)))
+    (sb/--show (format "*Second Brain: %s*" type) 'list (format "Notes of type %s (%d)" type (length nodes))
+               (lambda ()
+                 (setq sb/buffer-list-type type)
+                 (dolist (r nodes) (sb/--insert-item (sb/--record-line r) (sb/--record-item r) 0))))))
+
+;;;###autoload
+(defun sb/search (query)
+  "List the notes whose title contains QUERY, each with its type."
+  (interactive "sSearch titles for: ")
+  (let* ((q (downcase query))
+         (matches (seq-filter (lambda (node)
+                                (and (= (org-roam-node-level node) 0)
+                                     (string-search q (downcase (org-roam-node-title node)))))
+                              (org-roam-node-list))))
+    (sb/--show "*Search Results*" 'search (format "Search: \"%s\" (%d results)" query (length matches))
+               (lambda ()
+                 (dolist (node matches)
+                   (sb/--insert-item (format "  [%s] %s" (orsb-tools--node-type node nil) (org-roam-node-title node))
+                                     (list :id (org-roam-node-id node) :file (org-roam-node-file node)
+                                           :title (org-roam-node-title node))
+                                     0))))))
+
+;;; Proposals: changes waiting for approval
+
+(defun sb/--proposal-at-point ()
+  "The id of the proposal on this line, or nil."
+  (plist-get (or (get-text-property (point) 'sb-item)
+                 (get-text-property (line-beginning-position) 'sb-item))
+             :proposal))
+
+;;;###autoload
+(defun sb/proposals ()
+  "List the changes agents have filed for approval.
+RET shows what one would change, a approves it, r rejects it."
   (interactive)
-  (let ((data (sb/core-dangling-person-links))
-        (buf (get-buffer-create "*Untracked People*")))
-    (with-current-buffer buf
+  (let ((items (append (alist-get 'proposals (sb/--call #'orsb-tool-get-proposals '((limit . 200)))) nil)))
+    (sb/--show "*Second Brain: proposals*" 'proposals (format "Waiting for approval (%d)" (length items))
+               (lambda ()
+                 (unless items (insert "  Nothing is waiting.\n"))
+                 (dolist (p items)
+                   (sb/--insert-item
+                    (format "  %s  %-12s %s%s%s"
+                            (alist-get 'id p) (alist-get 'tool p)
+                            (string-join (append (alist-get 'files p) nil) ", ")
+                            (if (eq (alist-get 'stale p) t) "  [note changed since]" "")
+                            (let ((why (alist-get 'reason p)))
+                              (if (stringp why) (format "\n      %s" why) "")))
+                    (list :proposal (alist-get 'id p))
+                    0))
+                 (insert "\n  RET preview, a approve, r reject\n")))))
+
+(defun sb/proposal-show (id)
+  "Show what proposal ID would change, line by line."
+  (let ((p (sb/--call #'orsb-tool-get-proposals `((id . ,id)))))
+    (with-current-buffer (get-buffer-create "*Second Brain: proposal*")
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'dangling)
+        (insert (propertize (format "Proposal %s  (%s, %s)\n" id (alist-get 'tool p) (alist-get 'status p)) 'face 'bold))
+        (when (stringp (alist-get 'reason p)) (insert "Why: " (alist-get 'reason p) "\n"))
+        (when-let* ((changed (append (alist-get 'changed_since p) nil)))
+          (insert (propertize (format "The note changed since this was filed: %s\n" (string-join changed ", ")) 'face 'warning)))
+        (seq-doseq (c (alist-get 'would_change p))
+          (insert "\n" (propertize (format "%s  (%s)\n" (alist-get 'file c) (alist-get 'action c)) 'face 'bold))
+          (seq-doseq (l (alist-get 'lines_removed c)) (insert (propertize (concat "- " l "\n") 'face 'diff-removed)))
+          (seq-doseq (l (alist-get 'lines_added c)) (insert (propertize (concat "+ " l "\n") 'face 'diff-added))))
+        (goto-char (point-min))
+        (special-mode))
+      (display-buffer (current-buffer)))))
 
-        (insert (propertize "Untracked People\n" 'face 'bold))
-        (insert "These [[Name]] links don't have person nodes.\n\n")
+(defun sb/proposal-approve ()
+  "Approve the proposal at point: apply its change."
+  (interactive)
+  (let ((id (or (sb/--proposal-at-point) (user-error "No proposal on this line"))))
+    (when (y-or-n-p (format "Apply proposal %s? " id))
+      (condition-case err
+          (orsb-tool-decide-proposal `((id . ,id) (decision . "approve")))
+        (orsb-error
+         (if (and (eq (nth 1 err) 'conflict)
+                  (y-or-n-p (format "%s.  Apply it to the note as it is now? " (nth 2 err))))
+             (sb/--call #'orsb-tool-decide-proposal `((id . ,id) (decision . "approve") (force . t)))
+           (user-error "%s" (nth 2 err)))))
+      (message "Applied %s" id)
+      (sb/proposals))))
 
-        (if data
-            (dolist (item data)
-              (sb/--insert-item
-               (format "[[%s]] in: %s"
-                       (plist-get item :name)
-                       (truncate-string-to-width (plist-get item :item) 40))
-               item 0))
-          (insert "All person links are tracked.\n"))
+(defun sb/proposal-reject (note)
+  "Reject the proposal at point, keeping NOTE as the reason."
+  (interactive (list (if (sb/--proposal-at-point) (read-string "Why (optional): ") "")))
+  (let ((id (or (sb/--proposal-at-point) (user-error "No proposal on this line"))))
+    (sb/--call #'orsb-tool-decide-proposal
+               `((id . ,id) (decision . "reject") ,@(unless (string-empty-p note) `((note . ,note)))))
+    (message "Rejected %s" id)
+    (sb/proposals)))
 
-        (insert "\nKeys: n/p=navigate, c=create person, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
+(defun sb/buffer-visit-item ()
+  "Visit the item on this line: a note, or a proposal's preview."
+  (interactive)
+  (let ((item (or (get-text-property (point) 'sb-item)
+                  (get-text-property (line-beginning-position) 'sb-item))))
+    (cond ((null item) (message "No item on this line"))
+          ((plist-get item :proposal) (sb/proposal-show (plist-get item :proposal)))
+          ((plist-get item :file) (find-file (plist-get item :file)))
+          ((plist-get item :id) (org-roam-id-open (plist-get item :id) nil))
+          (t (message "Nothing to open for this item")))))
+
+(defun sb/buffer-do-refresh (_ignore-auto _noconfirm)
+  "Redo the listing this buffer shows."
+  (pcase sb/buffer-type
+    ('digest (sb/digest))
+    ('suggestions (sb/suggest-links sb/buffer-source-file))
+    ('open (sb/open))
+    ('stale (sb/stale))
+    ('list (sb/list sb/buffer-list-type))
+    ('proposals (sb/proposals))
+    (_ (message "This listing cannot be refreshed; run its command again"))))
+
+;;; ============================================================================
+;;; INTERACTIVE COMMANDS
+;;; ============================================================================
 
 ;;;###autoload
 (defun sb/suggest-links (&optional file)
@@ -1262,448 +744,9 @@ If FILE is nil, uses the current buffer's file."
           (display-buffer buf))
       (message "No unlinked similar notes found (or semantic search unavailable)"))))
 
-;;;###autoload
-(defun sb/weekly ()
-  "Display weekly review data."
-  (interactive)
-  (let* ((active (sb/core-active-projects))
-         (stale (sb/core-stale-projects))
-         (followups (sb/core-pending-followups))
-         (buf (get-buffer-create "*Weekly Review*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-
-        (insert (propertize "Weekly Review\n\n" 'face 'bold))
-        (insert (format "Date: %s\n\n" (format-time-string "%Y-%m-%d")))
-
-        ;; Projects summary
-        (insert (propertize "Projects\n" 'face 'bold))
-        (insert (format "  Active: %d\n" (length active)))
-        (insert (format "  Stale (>%d days): %d\n\n" sb/stale-days (length stale)))
-
-        ;; People summary
-        (insert (propertize "People\n" 'face 'bold))
-        (insert (format "  With pending follow-ups: %d\n\n" (length followups)))
-
-        ;; Action items
-        (insert (propertize "Suggested Actions\n" 'face 'bold))
-        (when stale
-          (insert "  - Review stale projects (M-x sb/stale)\n"))
-        (when followups
-          (insert "  - Check pending follow-ups (M-x sb/followups)\n"))
-        (insert "  - Run sb/suggest-links on key notes\n")
-
-        (insert "\nPress 'g' to refresh, 'q' to quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
-
-;;; ============================================================================
-;;; BLOG INTERACTIVE COMMANDS
-;;; ============================================================================
-
-;;;###autoload
-(defun sb/blog (title)
-  "Create a new blog post with TITLE.
-Prompts for Hugo section interactively."
-  (interactive "sBlog post title: ")
-  (let* ((section (completing-read "Hugo section: " sb/hugo-sections nil t))
-         (result (sb/core-create-blog title section)))
-    (find-file (plist-get result :file))
-    (message "Created blog post: %s in %s" title section)))
-
-;;;###autoload
-(defun sb/blog-set-draft ()
-  "Toggle draft status of the current blog post."
-  (interactive)
-  (let ((file (buffer-file-name)))
-    (unless file
-      (user-error "Not visiting a file"))
-    (let ((is-draft (sb/--blog-is-draft file)))
-      (sb/--blog-set-draft-value file (not is-draft))
-      (revert-buffer t t)
-      (message "Draft status: %s" (if is-draft "false (ready to publish)" "true (draft)")))))
-
-;;;###autoload
-(defun sb/blog-list (&optional filter)
-  "List all blog posts, optionally filtered by FILTER.
-FILTER can be: draft, published, or nil for all."
-  (interactive
-   (list (completing-read "Filter (empty for all): "
-                          '("" "draft" "published") nil t)))
-  (let* ((draft-filter (cond
-                        ((string= filter "draft") 'draft)
-                        ((string= filter "published") 'published)
-                        (t nil)))
-         (posts (sb/core-blog-posts draft-filter))
-         (buf (get-buffer-create "*Blog Posts*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'blog-list)
-
-        (insert (propertize (format "Blog Posts%s (%d)\n\n"
-                                    (if (and filter (not (string-empty-p filter)))
-                                        (format " [%s]" filter)
-                                      "")
-                                    (length posts))
-                            'face 'bold))
-
-        (if posts
-            (dolist (p posts)
-              (sb/--insert-item
-               (format "[%s] %s (%s, %dd ago)"
-                       (if (plist-get p :draft) "DRAFT" "LIVE")
-                       (plist-get p :title)
-                       (or (plist-get p :section) "?")
-                       (plist-get p :days-since-modified))
-               p 0))
-          (insert "No blog posts found.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
-
-;;;###autoload
-(defun sb/blog-from-idea ()
-  "Create a blog post from an existing idea node.
-Prompts to select an idea and Hugo section."
-  (interactive)
-  (let* ((ideas (sb/core-nodes-by-type 'idea))
-         (idea-titles (mapcar (lambda (i) (plist-get i :title)) ideas))
-         (selected-title (completing-read "Idea to convert: " idea-titles nil t))
-         (selected-idea (seq-find (lambda (i) (string= (plist-get i :title) selected-title)) ideas))
-         (section (completing-read "Hugo section: " sb/hugo-sections nil t)))
-    (if selected-idea
-        (let* ((idea-file (plist-get selected-idea :file))
-               (idea-content (with-temp-buffer
-                               (insert-file-contents idea-file)
-                               (buffer-string)))
-               (result (sb/core-create-blog selected-title section)))
-          ;; Open the new blog post
-          (find-file (plist-get result :file))
-          ;; Add link to original idea in Research section
-          (goto-char (point-max))
-          (when (re-search-backward "^\\* Research$" nil t)
-            (forward-line 1)
-            (insert (format "- [[id:%s][%s]] (original idea)\n"
-                            (org-roam-node-id (plist-get selected-idea :node))
-                            selected-title)))
-          (save-buffer)
-          (message "Created blog post from idea: %s" selected-title))
-      (user-error "Idea not found"))))
-
-;;;###autoload
-(defun sb/blog-generate-outline ()
-  "Generate an outline for the current blog post using AI.
-Requires `sb/blog-llm-function' to be configured."
-  (interactive)
-  (unless sb/blog-llm-function
-    (user-error "sb/blog-llm-function not configured"))
-  (let* ((file (buffer-file-name))
-         (title (save-excursion
-                  (goto-char (point-min))
-                  (when (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
-                    (match-string 1))))
-         (prompt (format "Generate a detailed blog post outline for: \"%s\"
-
-Create 5-7 main sections with brief descriptions. Format as:
-- [ ] Section Name - brief description of what to cover
-
-Keep it practical and focused." title))
-         (result (funcall sb/blog-llm-function prompt "")))
-    (when result
-      ;; Find the Outline section and replace content
-      (goto-char (point-min))
-      (when (re-search-forward "^\\* Outline$" nil t)
-        (forward-line 1)
-        (let ((start (point)))
-          ;; Delete until next heading or end
-          (if (re-search-forward "^\\* " nil t)
-              (progn (beginning-of-line) (delete-region start (point)))
-            (delete-region start (point-max)))
-          (insert result "\n\n")))
-      (save-buffer)
-      (message "Outline generated"))))
-
-;;;###autoload
-(defun sb/blog-expand-section ()
-  "Expand the current outline item to prose using AI.
-Place cursor on an outline item, and AI will generate content."
-  (interactive)
-  (unless sb/blog-llm-function
-    (user-error "sb/blog-llm-function not configured"))
-  (let* ((title (save-excursion
-                  (goto-char (point-min))
-                  (when (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
-                    (match-string 1))))
-         (current-line (thing-at-point 'line t))
-         (section-name (when (string-match "^-\\s-*\\[.?\\]\\s-*\\(.+\\)$" current-line)
-                         (match-string 1 current-line)))
-         (prompt (format "Write 2-3 paragraphs for a blog post section.
-Blog title: \"%s\"
-Section: \"%s\"
-
-Write in a clear, conversational technical style. Be specific and practical."
-                         title (or section-name current-line)))
-         (result (funcall sb/blog-llm-function prompt "")))
-    (when result
-      ;; Insert in Draft section
-      (save-excursion
-        (goto-char (point-min))
-        (when (re-search-forward "^\\* Draft$" nil t)
-          (goto-char (point-max))
-          (if (re-search-backward "^\\* " nil t)
-              (forward-line 0)
-            (goto-char (point-max)))
-          (insert (format "\n** %s\n\n%s\n"
-                          (or section-name "Section")
-                          result))))
-      (save-buffer)
-      (message "Section expanded"))))
-
-;;;###autoload
-(defun sb/blog-edit-tone (tone)
-  "Rewrite the selected region in the specified TONE using AI.
-Prompts for tone: professional, casual, technical, friendly."
-  (interactive
-   (list (completing-read "Tone: "
-                          '("professional" "casual" "technical" "friendly" "concise")
-                          nil t)))
-  (unless sb/blog-llm-function
-    (user-error "sb/blog-llm-function not configured"))
-  (unless (use-region-p)
-    (user-error "Please select a region first"))
-  (let* ((text (buffer-substring-no-properties (region-beginning) (region-end)))
-         (prompt (format "Rewrite the following text in a %s tone.
-Keep the same meaning but adjust the style. Return only the rewritten text.
-
-Text to rewrite:
-%s" tone text))
-         (result (funcall sb/blog-llm-function prompt "")))
-    (when result
-      (delete-region (region-beginning) (region-end))
-      (insert result)
-      (message "Text rewritten in %s tone" tone))))
-
-;;;###autoload
-(defun sb/blog-link-research ()
-  "Find semantically similar notes and add links to the Research section.
-Uses embeddings to find related notes that aren't already linked."
-  (interactive)
-  (let* ((file (buffer-file-name))
-         (suggestions (sb/core-unlinked-similar file)))
-    (if suggestions
-        (let* ((titles (mapcar (lambda (s)
-                                 (format "%.2f %s"
-                                         (plist-get s :similarity)
-                                         (plist-get s :title)))
-                               suggestions))
-               (selected (completing-read-multiple "Link notes (comma-sep): " titles)))
-          (when selected
-            ;; Find Research section and add links
-            (save-excursion
-              (goto-char (point-min))
-              (when (re-search-forward "^\\* Research$" nil t)
-                (forward-line 1)
-                (dolist (sel selected)
-                  (let* ((title (string-trim (substring sel 5)))  ; Remove similarity prefix
-                         (match (seq-find (lambda (s) (string= (plist-get s :title) title))
-                                          suggestions)))
-                    (when match
-                      (let ((node (sb/--node-from-file (plist-get match :file))))
-                        (when node
-                          (insert (format "- [[id:%s][%s]]\n"
-                                          (org-roam-node-id node)
-                                          title)))))))))
-            (save-buffer)
-            (message "Added %d research links" (length selected))))
-      (message "No similar unlinked notes found"))))
-
-;;;###autoload
-(defun sb/blog-publish ()
-  "Validate and export the current blog post via ox-hugo.
-Sets draft to false and exports to the Hugo content directory."
-  (interactive)
-  (let* ((file (buffer-file-name))
-         (validation-error (sb/--blog-validate file)))
-    (if validation-error
-        (user-error "Cannot publish: %s" validation-error)
-      ;; Set draft to false
-      (sb/--blog-set-draft-value file nil)
-      (revert-buffer t t)
-      ;; Export via ox-hugo
-      (if (fboundp 'org-hugo-export-to-md)
-          (progn
-            (org-hugo-export-to-md)
-            (message "Published! Export complete."))
-        (user-error "ox-hugo not available. Install it with: M-x package-install RET ox-hugo")))))
-
 ;;; ============================================================================
 ;;; LIST AND SEARCH COMMANDS
 ;;; ============================================================================
-
-;;;###autoload
-(defun sb/projects (&optional status)
-  "List all projects, optionally filtered by STATUS.
-STATUS can be: active, waiting, blocked, someday, done, or nil for all."
-  (interactive
-   (list (completing-read "Filter by status (empty for all): "
-                          '("" "active" "waiting" "blocked" "someday" "done")
-                          nil t)))
-  (let* ((all-projects (sb/core-nodes-by-type 'project))
-         (filtered (if (and status (not (string-empty-p status)))
-                       (seq-filter
-                        (lambda (p)
-                          (let ((s (cdr (assoc "status" (plist-get p :properties)))))
-                            (and s (string= (downcase s) (downcase status)))))
-                        all-projects)
-                     all-projects))
-         (buf (get-buffer-create "*Projects*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'projects)
-
-        (insert (propertize (format "Projects%s (%d)\n\n"
-                                    (if (and status (not (string-empty-p status)))
-                                        (format " [%s]" status)
-                                      "")
-                                    (length filtered))
-                            'face 'bold))
-
-        (if filtered
-            (dolist (p filtered)
-              (let* ((props (plist-get p :properties))
-                     (status (or (cdr (assoc "status" props)) "unknown"))
-                     (next-action (cdr (assoc "next-action" props)))
-                     (days (round (or (sb/--file-modified-days-ago (plist-get p :file)) 0))))
-                (sb/--insert-item
-                 (format "[%s] %s%s (%dd ago)"
-                         status
-                         (plist-get p :title)
-                         (if next-action (format " -> %s" next-action) "")
-                         days)
-                 (list :id (org-roam-node-id (plist-get p :node))
-                       :file (plist-get p :file)
-                       :title (plist-get p :title))
-                 0)))
-          (insert "No projects found.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
-
-;;;###autoload
-(defun sb/people ()
-  "List all people nodes."
-  (interactive)
-  (let* ((all-people (sb/core-nodes-by-type 'person))
-         (buf (get-buffer-create "*People*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'people)
-
-        (insert (propertize (format "People (%d)\n\n" (length all-people)) 'face 'bold))
-
-        (if all-people
-            (dolist (p all-people)
-              (let* ((props (plist-get p :properties))
-                     (context (cdr (assoc "context" props)))
-                     (last-contact (cdr (assoc "last-contact" props))))
-                (sb/--insert-item
-                 (format "%s%s%s"
-                         (plist-get p :title)
-                         (if context (format " (%s)" context) "")
-                         (if last-contact (format " [%s]" last-contact) ""))
-                 (list :id (org-roam-node-id (plist-get p :node))
-                       :file (plist-get p :file)
-                       :name (plist-get p :title))
-                 0)))
-          (insert "No people found.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
-
-;;;###autoload
-(defun sb/search (query)
-  "Search for nodes by title matching QUERY.
-Searches across all node types."
-  (interactive "sSearch for: ")
-  (let* ((query-lower (downcase query))
-         (all-nodes (org-roam-node-list))
-         (matches (seq-filter
-                   (lambda (node)
-                     (and (= (org-roam-node-level node) 0)  ;; File-level only
-                          (string-match-p (regexp-quote query-lower)
-                                          (downcase (org-roam-node-title node)))))
-                   all-nodes))
-         (buf (get-buffer-create "*Search Results*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'search)
-
-        (insert (propertize (format "Search: \"%s\" (%d results)\n\n" query (length matches))
-                            'face 'bold))
-
-        (if matches
-            (dolist (node matches)
-              (let* ((file (org-roam-node-file node))
-                     (props (sb/--extract-properties file))
-                     (node-type (or (cdr (assoc "node-type" props)) "note")))
-                (sb/--insert-item
-                 (format "[%s] %s"
-                         node-type
-                         (org-roam-node-title node))
-                 (list :id (org-roam-node-id node)
-                       :file file
-                       :title (org-roam-node-title node))
-                 0)))
-          (insert "No matches found.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
-
-;;;###autoload
-(defun sb/ideas ()
-  "List all idea nodes."
-  (interactive)
-  (let* ((all-ideas (sb/core-nodes-by-type 'idea))
-         (buf (get-buffer-create "*Ideas*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (sb/buffer-mode)
-        (setq sb/buffer-type 'ideas)
-
-        (insert (propertize (format "Ideas (%d)\n\n" (length all-ideas)) 'face 'bold))
-
-        (if all-ideas
-            (dolist (p all-ideas)
-              (let* ((props (plist-get p :properties))
-                     (one-liner (cdr (assoc "one-liner" props))))
-                (sb/--insert-item
-                 (format "%s%s"
-                         (plist-get p :title)
-                         (if one-liner (format " - %s" (truncate-string-to-width one-liner 50)) ""))
-                 (list :id (org-roam-node-id (plist-get p :node))
-                       :file (plist-get p :file)
-                       :title (plist-get p :title))
-                 0)))
-          (insert "No ideas found.\n"))
-
-        (insert "\nKeys: n/p=navigate, RET=open, g=refresh, q=quit\n")
-        (goto-char (point-min))))
-    (display-buffer buf)))
 
 ;;; ============================================================================
 ;;; DAILY AUTO-LINKING COMMANDS
@@ -1880,20 +923,6 @@ With prefix arg, prompts for similarity THRESHOLD."
 ;;; KEY BINDINGS (C-c b prefix)
 ;;; ============================================================================
 
-(defvar sb/blog-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "b") 'sb/blog)              ; Create new blog post
-    (define-key map (kbd "l") 'sb/blog-list)         ; List blog posts
-    (define-key map (kbd "d") 'sb/blog-set-draft)    ; Toggle draft status
-    (define-key map (kbd "i") 'sb/blog-from-idea)    ; Create from idea
-    (define-key map (kbd "o") 'sb/blog-generate-outline)  ; AI outline
-    (define-key map (kbd "e") 'sb/blog-expand-section)    ; AI expand
-    (define-key map (kbd "t") 'sb/blog-edit-tone)    ; AI tone
-    (define-key map (kbd "r") 'sb/blog-link-research) ; Link research
-    (define-key map (kbd "p") 'sb/blog-publish)      ; Publish
-    map)
-  "Keymap for blog commands under C-c b B.")
-
 (defvar sb/daily-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "l") 'sb/daily-link)        ; Link current daily
@@ -1904,29 +933,15 @@ With prefix arg, prompts for similarity THRESHOLD."
 
 (defvar sb/command-map
   (let ((map (make-sparse-keymap)))
-    ;; Create commands
-    (define-key map (kbd "p") 'sb/person)
-    (define-key map (kbd "P") 'sb/project)
-    (define-key map (kbd "i") 'sb/idea)
-    (define-key map (kbd "a") 'sb/admin)
+    (define-key map (kbd "n") 'sb/new)            ; a note of any type the vault defines
     (define-key map (kbd "I") 'sb/inbox)
-    ;; List commands (l prefix)
-    (define-key map (kbd "l p") 'sb/projects)
-    (define-key map (kbd "l e") 'sb/people)
-    (define-key map (kbd "l i") 'sb/ideas)
-    (define-key map (kbd "l b") 'sb/blog-list)  ; Also accessible via l b
-    ;; Search
-    (define-key map (kbd "/") 'sb/search)
-    ;; Surfacing commands
-    (define-key map (kbd "d") 'sb/digest)
-    (define-key map (kbd "f") 'sb/followups)
+    (define-key map (kbd "l") 'sb/list)           ; notes of one type
+    (define-key map (kbd "o") 'sb/open)           ; unfinished notes
     (define-key map (kbd "s") 'sb/stale)
-    (define-key map (kbd "u") 'sb/dangling)
-    (define-key map (kbd "L") 'sb/suggest-links)  ;; Capital L for link suggestions
-    (define-key map (kbd "w") 'sb/weekly)
-    ;; Blog commands (B prefix)
-    (define-key map (kbd "B") sb/blog-map)
-    ;; Daily commands (D prefix)
+    (define-key map (kbd "d") 'sb/digest)
+    (define-key map (kbd "A") 'sb/proposals)      ; changes waiting for approval
+    (define-key map (kbd "/") 'sb/search)
+    (define-key map (kbd "L") 'sb/suggest-links)
     (define-key map (kbd "D") sb/daily-map)
     map)
   "Keymap for Second Brain commands.")

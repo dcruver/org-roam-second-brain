@@ -19,7 +19,8 @@ no note types of its own: a vault describes its types in `_schema.org` files
 | `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
 | `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
 | `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
-| `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`), capture commands, the daily digest, blog helpers. |
+| `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`). `sb/new` creates a note of any type the vault defines, asking for what that type requires; `sb/digest`, `sb/open`, `sb/stale` and `sb/list` show unfinished work and notes by type; `sb/proposals` reviews changes waiting for approval (RET preview, `a` approve, `r` reject); plus the inbox, title search, link suggestions and daily-note linking. It goes through the same tool functions as the MCP server, so the same rules apply. |
+| `orsb-blog.el` | Optional: the `sb/blog-*` commands for a folder of ox-hugo posts (`orsb-blog-directory`), under `C-c b B` once loaded. |
 | `org-agenda-project-tracking.el` | Optional agenda views and TODO journaling (`orsb-agenda-setup`). |
 
 ## Install
