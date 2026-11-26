@@ -1,7 +1,7 @@
 ;;; orsb-core.el --- Core domain logic for org-roam-second-brain -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.1
+;; Version: 3.1.2
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain

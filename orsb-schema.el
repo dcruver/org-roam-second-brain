@@ -1,7 +1,7 @@
 ;;; orsb-schema.el --- Note types and their rules, read from the vault -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.1
+;; Version: 3.1.2
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -304,6 +304,14 @@ lines above the first heading, keys upcased), `headings'
            (props (when (string-match "\\`\\(?:[ \t]*\n\\)*[ \t]*:PROPERTIES:[ \t]*\n\\(\\(?:.*\n\\)*?\\)[ \t]*:END:" text)
                     (orsb-schema--drawer (match-string 0 text))))
            (pos 0) headings ids)
+      ;; an example or source block shows org text, it is not the note's own:
+      ;; a heading or an :ID: inside one is neither a section nor an id
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*#\\+begin_\\(example\\|src\\)\\b.*$" nil t)
+        (let ((from (match-end 0)))
+          (when (re-search-forward (format "^[ \t]*#\\+end_%s\\b" (regexp-quote (match-string 1))) nil t)
+            (delete-region from (match-beginning 0)))))
+      (setq text (buffer-string))
       (let ((case-fold-search nil))
         (while (string-match "^\\* +\\(.*\\)$" text pos)
           (push (downcase (string-trim (replace-regexp-in-string "[ \t]+:[[:alnum:]_@#%:]+:[ \t]*\\'" ""

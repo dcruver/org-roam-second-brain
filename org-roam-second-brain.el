@@ -2,7 +2,7 @@
 
 ;; Author: David Cruver <dcruver@users.noreply.github.com>
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 3.1.1
+;; Version: 3.1.2
 ;; Package-Requires: ((emacs "27.1") (org-roam "2.2"))
 
 ;;; Commentary:

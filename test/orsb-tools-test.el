@@ -559,6 +559,29 @@ Return (RPC-RESPONSE . ENVELOPE) where ENVELOPE is the decoded tool text."
         (orsb-tools-test--data "restore" 'change_id (alist-get 'change_id done))
         (should (string-match-p ":ID: 1700000000" (orsb-test--file hidden)))))))
 
+(ert-deftest orsb-tools-a-shared-heading-id-and-ids-in-examples ()
+  (orsb-test-with-vault
+    (dolist (n '("one" "two"))
+      (with-temp-file (expand-file-name (concat "h-" n ".org") org-roam-directory)
+        (insert ":PROPERTIES:\n:ID: note-" n "\n:END:\n#+title: H " n "\n\n* Part\n:PROPERTIES:\n:ID: same-part\n:END:\nText.\n"
+                "\n#+begin_example\n* Not a section\n:PROPERTIES:\n:ID: <uuid>\n:END:\n#+end_example\n")))
+    (org-roam-db-sync)
+    ;; the ids inside the example blocks are text, not ids: only the heading id is shared
+    (let ((v (alist-get 'violations (orsb-tools-test--data "check_schema" 'rule "duplicate-id"))))
+      (should (= (length v) 2))
+      (should (string-match-p "same-part" (alist-get 'detail (car v)))))
+    (let* ((seen (file-name-nondirectory (org-roam-node-file (org-roam-node-from-id "same-part"))))
+           (hidden (if (equal seen "h-one.org") "h-two.org" "h-one.org")))
+      (should (equal (alist-get 'code (orsb-tools-test--error "reassign_id" 'file seen 'id "same-part")) "refused"))
+      (should (equal (alist-get 'code (orsb-tools-test--error "reassign_id" 'file hidden 'id "nope")) "not_found"))
+      (let ((done (orsb-tools-test--data "reassign_id" 'file hidden 'id "same-part")))
+        (should (string-match-p (concat "\\* Part\n:PROPERTIES:\n:ID: " (regexp-quote (alist-get 'new_id done)))
+                                (orsb-test--file hidden)))
+        ;; the note's own id and the example text are untouched
+        (should (string-match-p ":ID: note-" (orsb-test--file hidden)))
+        (should (string-match-p ":ID: <uuid>" (orsb-test--file hidden))))
+      (should-not (alist-get 'duplicate-id (alist-get 'by_rule (orsb-tools-test--data "check_schema")))))))
+
 (ert-deftest orsb-tools-a-proposal-goes-stale-or-is-rejected ()
   (orsb-test-with-vault
     (orsb-tools-test--schema-vault "strict")

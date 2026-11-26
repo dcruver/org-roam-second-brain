@@ -1,7 +1,7 @@
 ;;; orsb-tools.el --- The 2.0 MCP tool contract -*- lexical-binding: t; -*-
 
 ;; Author: Don Cruver
-;; Version: 3.1.1
+;; Version: 3.1.2
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -73,7 +73,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.1.1")
+(defconst orsb-tools-version "3.1.2")
 
 ;;;; Argument helpers
 
@@ -1211,10 +1211,14 @@ write the keyword :json-null as the string \"json-null\"."
          (file (orsb-core--vault-file rel)))
     (unless (and (string-suffix-p ".org" file) (file-in-directory-p file root) (file-regular-p file))
       (orsb-error-hint 'not-found "check_schema with rule duplicate-id lists the files." "No note at %s" rel))
-    (let* ((id (or (orsb-tools--file-id file) (orsb-error 'refused "%s has no id of its own" rel)))
-           (others (seq-filter (lambda (f) (and (not (file-equal-p f file)) (equal (orsb-tools--file-id f) id)))
+    (let* ((heading-id (orsb-arg args 'id))
+           (id (or heading-id (orsb-tools--file-id file) (orsb-error 'refused "%s has no id of its own" rel)))
+           (others (seq-filter (lambda (f) (and (not (file-equal-p f file))
+                                                (member id (alist-get 'ids (orsb-schema--note-facts f)))))
                                (orsb-schema--note-files root)))
            (indexed (ignore-errors (org-roam-node-file (org-roam-node-from-id id)))))
+      (unless (member id (alist-get 'ids (orsb-schema--note-facts file)))
+        (orsb-error 'not-found "%s has no :ID: %s" rel id))
       (unless others
         (orsb-error 'refused "No other note has the id %s, so %s keeps it" id rel))
       (when (and indexed (file-equal-p indexed file) (not (orsb-arg-bool args 'force)))
@@ -1229,7 +1233,7 @@ write the keyword :json-null as the string \"json-null\"."
            (with-current-buffer (find-file-noselect file)
              (save-excursion
                (goto-char (point-min))
-               (re-search-forward "^[ \t]*:ID:[ \t]+\\(\\S-+\\)")
+               (re-search-forward (format "^[ \t]*:ID:[ \t]+\\(%s\\)[ \t]*$" (regexp-quote id)))
                (replace-match new t t nil 1)))
            (orsb-core--after-write file)
            `((file . ,rel) (old_id . ,id) (new_id . ,new)
@@ -1665,6 +1669,7 @@ With propose in ARGS the call is filed as a proposal instead of run."
      "Give a note a new id when it shares its id with another note (check_schema rule duplicate-id). Only one note per id is visible to search and links; this makes the hidden one visible. Refuses the copy the index holds, since links point at it."
      ("file")
      ((file . ((type . "string") (description . "Vault path of the hidden note, as check_schema prints it")))
+      (id . ((type . "string") (description . "When the shared id sits on a heading inside the note: that id. Omitted, the note's own id")))
       (force . ((type . "boolean") (default . :json-false) (description . "Reassign even the copy the index holds")))
       ,orsb-tools--dry-run-schema))
     ("get_schema" orsb-tool-get-schema
