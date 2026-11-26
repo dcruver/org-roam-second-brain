@@ -325,7 +325,7 @@ Files without an :ID: are not org-roam nodes.
 
 (ert-deftest orsb-core-empty-section-followed-by-a-heading ()
   "An empty section's body ends where the next heading starts.
-Until 3.0 it was taken to be the next section: an append landed there and a
+Until 2.2.2 it was taken to be the next section: an append landed there and a
 replace deleted it."
   (orsb-test-with-vault
     (orsb-test--write "misc/three.org" ":PROPERTIES:\n:ID: three\n:END:\n#+title: Three\n\n* A\nkeep A\n* B\n* C\nkeep C\n** C child\ndeep\n* D")
