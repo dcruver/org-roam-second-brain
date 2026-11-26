@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-coldframe
-:NODE-TYPE: idea
 :ONE-LINER: A cold frame from salvaged windows to start greens early
 :END:
 #+title: Cold frame

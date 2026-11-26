@@ -1,0 +1,15 @@
+#+title: Schema: every note in the sample vault
+
+* Type
+:PROPERTIES:
+:TYPE: note
+:WRITE: open
+:ENFORCE: warn
+:EXCLUDE: archive
+:END:
+The sample vault for the small-model chores. Types are folders; see the README.
+
+* Properties
+| property | required | form |
+|----------+----------+------|
+| ID       | yes      | id   |

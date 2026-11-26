@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-garden
-:NODE-TYPE: project
 :STATUS:   active
 :NEXT-ACTION: Finish the raised bed before spring planting
 :END:

@@ -1,0 +1,5 @@
+* Type
+:PROPERTIES:
+:TYPE: reference
+:END:
+Things known.

@@ -14,7 +14,8 @@ A check is a dict with a "type" and its arguments; check() returns
   {"title_re": "dehydrat", "type": "idea"}
                                       a note whose #+title matches the regular
                                       expression (case-insensitive), optionally
-                                      of a NODE-TYPE; exactly one must match
+                                      of a type (the type of the folder the
+                                      note is in); exactly one must match
 
 Check types:
 
@@ -28,6 +29,9 @@ Check types:
   heading         {note, title_re, todo?, deadline?, scheduled?, absent?}
   checkbox        {note, text, checked}        a "- [ ]" / "- [X]" item
   link            {from, to, either_way?}      [[id:...]] link from one note to another
+  proposal        {text_re, status?, absent?}  a change filed for approval whose stored
+                                               call matches (asked of the server, not read
+                                               from the vault: nothing is written until approved)
   answer          {all_re: [...], none_re?: [...]}
                                                tests the model's final reply
 """
@@ -61,9 +65,7 @@ class Note:
     ids: list
     headings: list
 
-    @property
-    def node_type(self):
-        return self.props.get("NODE-TYPE")
+    node_type: str = None   # the type of the folder the note lives in (its _schema.org)
 
 
 def _drawer(lines, i):
@@ -117,6 +119,25 @@ def parse_note(root, rel):
     return Note(path=rel, text=text, props=props, title=title, ids=ids, headings=headings)
 
 
+SCHEMA_FILE = "_schema.org"
+
+
+def folder_type(root, rel_dir):
+    """The note type of the folder REL_DIR: the TYPE its _schema.org sets, else
+    that of the nearest folder above that has one."""
+    d = rel_dir
+    while True:
+        f = os.path.join(root, d, SCHEMA_FILE)
+        if os.path.exists(f):
+            with open(f, encoding="utf-8") as fh:
+                m = re.search(r"^\s*:TYPE:\s*(\S+)", fh.read(), re.M)
+            if m:
+                return m.group(1)
+        if not d:
+            return None
+        d = os.path.dirname(d)
+
+
 class Vault:
     def __init__(self, root):
         self.root = root
@@ -124,9 +145,12 @@ class Vault:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for fn in filenames:
-                if fn.endswith(".org") and not fn.startswith(".#"):
+                if fn.endswith(".org") and not fn.startswith(".#") and fn != SCHEMA_FILE:
                     rel = os.path.relpath(os.path.join(dirpath, fn), root)
-                    self.notes.append(parse_note(root, rel))
+                    note = parse_note(root, rel)
+                    note.node_type = folder_type(root, os.path.dirname(rel))
+                    self.notes.append(note)
+        self.proposals = []   # filled by the harness: changes filed for approval
 
     # --- selection -------------------------------------------------------
 
@@ -188,6 +212,15 @@ class Vault:
             except LookupError as e:
                 return False, str(e)
         return inner
+
+    def _check_proposal(self, c, _):
+        rx = re.compile(c["text_re"], re.I | re.S)
+        hits = [p for p in self.proposals
+                if p.get("status") == c.get("status", "pending") and rx.search(p.get("text", ""))]
+        if c.get("absent"):
+            return (not hits), ("none filed" if not hits else f"a proposal matches /{c['text_re']}/")
+        return bool(hits), (f"proposal {hits[0].get('id')} is waiting" if hits
+                            else f"no {c.get('status', 'pending')} proposal matches /{c['text_re']}/ ({len(self.proposals)} filed)")
 
     @_wrap
     def _check_note_exists(self, c, _):

@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-sam
-:NODE-TYPE: person
 :CONTEXT:  Neighbor down the road
 :END:
 #+title: Sam Lee

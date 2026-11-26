@@ -351,9 +351,16 @@ def run_chore(args, chore, rep, today, embed_url, out_dir):
         else:
             final = chat_agent(args, mcp, chore, today, stats, log)
         record["agent_seconds"] = round(time.time() - agent_started, 1)
+        filed = []
+        _t, env, ok = mcp.call("get_proposals", {"status": "all", "limit": 50})
+        for p in ((env or {}).get("data", {}).get("proposals", []) if ok else []):
+            _t2, one, ok2 = mcp.call("get_proposals", {"id": p["id"]})
+            d = (one or {}).get("data", {}) if ok2 else {}
+            filed.append({"id": p["id"], "status": p.get("status"), "tool": p.get("tool"),
+                          "text": json.dumps({"tool": p.get("tool"), "arguments": d.get("arguments"), "reason": p.get("reason")})})
     except Exception as e:
         record["harness_error"] = str(e)
-        final, before = "", None
+        final, before, filed = "", None, []
         log.write("harness_error", error=str(e))
     finally:
         if mcp:
@@ -362,6 +369,7 @@ def run_chore(args, chore, rep, today, embed_url, out_dir):
     checks = []
     if "harness_error" not in record:
         vault_now = vaultcheck.Vault(vault)
+        vault_now.proposals = filed
         for c in chore["checks"]:
             ok, detail = vault_now.check(c, final)
             checks.append({"check": c["type"], "ok": ok, "detail": detail})

@@ -1,0 +1,8 @@
+* Type
+:PROPERTIES:
+:TYPE: principle
+:WRITE: propose
+:NEVER: move merge delete
+:ENFORCE: strict
+:END:
+What this household holds to. These notes change only when their owner approves.

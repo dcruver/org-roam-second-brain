@@ -1,0 +1,22 @@
+* Type
+:PROPERTIES:
+:TYPE: project
+:ENFORCE: strict
+:LIFECYCLE: STATUS
+:LIFECYCLE_VALUES: active waiting blocked someday done cancelled
+:LIFECYCLE_FINISHED: done cancelled
+:END:
+Work with an outcome and an end.
+
+* Properties
+| property    | required | form                    | default |
+|-------------+----------+-------------------------+---------|
+| STATUS      | yes      | one of LIFECYCLE_VALUES | active  |
+| NEXT-ACTION | no       | one sentence            |         |
+
+* Sections
+| section       | required | rule    |
+|---------------+----------+---------|
+| Current state | no       | replace |
+| Log           | no       | append  |
+| Decisions     | no       | propose |

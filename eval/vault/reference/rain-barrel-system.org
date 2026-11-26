@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-rain-1
-:NODE-TYPE: reference
 :END:
 #+title: Rain barrel system
 

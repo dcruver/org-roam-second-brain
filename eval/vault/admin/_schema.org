@@ -1,0 +1,7 @@
+* Type
+:PROPERTIES:
+:TYPE: task
+:LIFECYCLE: STATUS
+:LIFECYCLE_VALUES: active waiting done cancelled
+:LIFECYCLE_FINISHED: done cancelled
+:END:

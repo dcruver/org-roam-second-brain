@@ -63,7 +63,10 @@
 - Every write returns change_id; restore with it undoes the change. Writes take dry_run:true to preview.
 - Errors carry a hint saying what to do next; follow it instead of retrying the same call.
 - get_review shows what needs attention; get_tasks lists open tasks; set_checkbox and set_node close them.
-- Unsure of an allowed value? Call get_schema."
+- A note's type is the folder it is in. get_schema lists the types; get_schema with type shows what one requires: properties, sections, allowed status values.
+- When you add text to a note, name the section. A section may only grow (append) or be rewritten whole (replace); the type's schema says which.
+- If a write answers with warnings, it was made but broke a rule of the note's type: say which.
+- If a write is refused because the change needs approval, repeat the same call with propose:true and a reason. That writes nothing: say it is waiting for approval, never that it was done."
   "Text sent to MCP clients at initialize, as guidance for the model.\nnil sends none."
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)

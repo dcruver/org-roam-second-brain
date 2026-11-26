@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-fence
-:NODE-TYPE: project
 :STATUS:   active
 :NEXT-ACTION: Rehang the gate
 :END:
@@ -9,6 +8,15 @@
 
 Split rail fence along the north property line. The neighbor shares the cost
 of the stretch along the road.
+
+* Current state
+Nothing has been started; waiting on a dry weekend.
+
+* Log
+- 2026-05-02 walked the line and counted the rotten rails
+
+* Decisions
+- Split rail, not wire, to match what is there.
 
 * Tasks
 ** TODO Fix the fence gate

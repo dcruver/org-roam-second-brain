@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-rain-2
-:NODE-TYPE: reference
 :END:
 #+title: Rainwater collection
 

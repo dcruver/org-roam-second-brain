@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-router
-:NODE-TYPE: reference
 :END:
 #+title: Old router notes
 

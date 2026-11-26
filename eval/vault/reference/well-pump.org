@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-well
-:NODE-TYPE: reference
 :END:
 #+title: Well pump
 

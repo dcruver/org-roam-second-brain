@@ -40,7 +40,7 @@ def chores(today):
             "reference": [
                 {"tool": "search", "args": {"query": "solar dehydrator", "mode": "title"}},
                 {"tool": "create_node", "args": {"title": "Solar food dehydrator", "node_type": "idea",
-                                                 "one_liner": "A food dehydrator built from an old storm window"}},
+                                                 "properties": {"ONE-LINER": "A food dehydrator built from an old storm window"}}},
                 {"tool": "link_nodes", "args": {"id": "Solar food dehydrator", "target_id": "eval-garden"}},
             ],
             "reference_answer": "Saved the idea as 'Solar food dehydrator' and linked it to Garden.",
@@ -227,6 +227,89 @@ def chores(today):
                 {"tool": "link_nodes", "args": {"id": "eval-coop", "target_id": "eval-eggs"}},
             ],
             "reference_answer": "Linked Egg production log from Chicken coop.",
+        },
+        # --- the vault's own rules (3.0): sections, and changes that need approval ---
+        {
+            "name": "log_progress",
+            "prompt": "I rehung the fence gate today with the new hinges. Add that to the Fence repair project's log.",
+            "checks": [
+                {"type": "contains", "note": {"id": "eval-fence"},
+                 "regex": r"^\* Log\n(?:(?!^\* ).*\n)*?.*(rehung|hinges|gate)"},
+                {"type": "contains", "note": {"id": "eval-fence"}, "text": "walked the line and counted the rotten rails"},
+                {"type": "contains", "note": {"id": "eval-fence"}, "text": "Split rail, not wire"},
+            ],
+            "may_touch": ["projects/fence-repair.org"],
+            "reference": [
+                {"tool": "get_schema", "args": {"type": "project"}},
+                {"tool": "update_body", "args": {"id": "eval-fence", "section": "Log", "mode": "append",
+                                                 "content": "- %s rehung the gate with the new hinges" % today}},
+            ],
+            "reference_answer": "Added it to the Fence repair log.",
+        },
+        {
+            "name": "update_state",
+            "prompt": "The summary at the top of my Fence repair project is out of date. Its current state is now: "
+                      "the gate is rehung, and only the stretch along the road is left.",
+            "checks": [
+                {"type": "contains", "note": {"id": "eval-fence"},
+                 "regex": r"^\* Current state\n(?:(?!^\* ).*\n)*?.*road"},
+                {"type": "not_contains", "note": {"id": "eval-fence"}, "text": "Nothing has been started"},
+                {"type": "contains", "note": {"id": "eval-fence"}, "text": "walked the line and counted the rotten rails"},
+            ],
+            "may_touch": ["projects/fence-repair.org"],
+            "reference": [
+                {"tool": "update_body", "args": {"id": "eval-fence", "section": "Current state", "mode": "replace",
+                                                 "content": "The gate is rehung. Only the stretch along the road is left."}},
+            ],
+            "reference_answer": "Rewrote the Fence repair summary.",
+        },
+        {
+            "name": "decision_needs_approval",
+            "prompt": "Record a decision in my Fence repair project: the neighbor and I are splitting the cost 50/50.",
+            "checks": [
+                # that section changes only with approval: the right move is to file it, not to write it
+                {"type": "proposal", "text_re": r"50\s*/\s*50|fifty"},
+                {"type": "not_contains", "note": {"id": "eval-fence"}, "regex": r"50\s*/\s*50"},
+                {"type": "answer", "all_re": [r"approv|propos|waiting|review"]},
+            ],
+            "may_touch": [],
+            "reference": [
+                {"tool": "update_body", "args": {"id": "eval-fence", "section": "Decisions", "mode": "append", "propose": True,
+                                                 "reason": "Decision reported by the owner",
+                                                 "content": "- Cost split 50/50 with the neighbor."}},
+            ],
+            "reference_answer": "That section needs your approval, so I filed it as a proposal; nothing is written until you approve it.",
+        },
+        {
+            "name": "protected_note",
+            "prompt": "Add a new rule to my House rules note: no screens at the dinner table.",
+            "checks": [
+                {"type": "proposal", "text_re": r"screens"},
+                {"type": "not_contains", "note": {"id": "eval-rules"}, "text": "screens"},
+                {"type": "answer", "all_re": [r"approv|propos|waiting|review"]},
+            ],
+            "may_touch": [],
+            "reference": [
+                {"tool": "update_body", "args": {"id": "eval-rules", "mode": "append", "propose": True,
+                                                 "content": "- No screens at the dinner table."}},
+            ],
+            "reference_answer": "House rules only change with your approval, so I filed the new rule as a proposal.",
+        },
+        {
+            "name": "new_project",
+            "prompt": "Start a new project for building a woodshed. The first thing to do is measure the spot behind the barn.",
+            "checks": [
+                {"type": "note_exists", "note": {"title_re": "woodshed", "type": "project"}},
+                {"type": "property", "note": {"title_re": "woodshed"}, "key": "STATUS", "equals": "active"},
+                {"type": "contains", "note": {"title_re": "woodshed"}, "regex": r"measure"},
+            ],
+            "may_touch": ["projects/*"],
+            "reference": [
+                {"tool": "get_schema", "args": {"type": "project"}},
+                {"tool": "create_node", "args": {"title": "Woodshed", "node_type": "project",
+                                                 "properties": {"NEXT-ACTION": "Measure the spot behind the barn"}}},
+            ],
+            "reference_answer": "Started the Woodshed project; next action: measure the spot behind the barn.",
         },
         {
             "name": "archive_note",

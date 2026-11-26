@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-furnace
-:NODE-TYPE: admin
 :END:
 #+title: Furnace maintenance
 

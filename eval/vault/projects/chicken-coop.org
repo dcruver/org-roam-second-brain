@@ -1,6 +1,5 @@
 :PROPERTIES:
 :ID:       eval-coop
-:NODE-TYPE: project
 :STATUS:   active
 :NEXT-ACTION: Frame the walls
 :END:

@@ -1,0 +1,10 @@
+* Type
+:PROPERTIES:
+:TYPE: idea
+:END:
+Something that might be done.
+
+* Properties
+| property  | required | form |
+|-----------+----------+------|
+| ONE-LINER | no       | text |

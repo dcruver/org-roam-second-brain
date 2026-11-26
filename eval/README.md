@@ -1,7 +1,7 @@
 # Small-model chores
 
 Can a small local model keep this second brain by itself? This directory is a
-test kit for that question. It gives a model fourteen everyday vault chores
+test kit for that question. It gives a model nineteen everyday vault chores
 through the MCP tools, one at a time on a fresh copy of a sample vault, and
 then reads the vault files to see whether the chore was really done.
 
@@ -22,6 +22,11 @@ then reads the vault files to see whether the chore was really done.
 | `set_status` | the fence repair is on hold | `STATUS: waiting` |
 | `inbox_capture` | quick note: call the county about the survey | today's daily note has it |
 | `link_related` | link notes related to the coop that aren't yet | coop links to Egg production log, and not to unrelated notes |
+| `log_progress` | I rehung the gate; add that to the project's log | the line is under `Log`, and what was there is still there |
+| `update_state` | the project's summary is out of date; it is now ... | `Current state` is rewritten, the old summary gone, the log untouched |
+| `decision_needs_approval` | record a decision in the project | a proposal is waiting, the note is unchanged, and the reply says so |
+| `protected_note` | add a rule to my House rules | the same, for a note whose whole type needs approval |
+| `new_project` | start a project for a woodshed; first measure the spot | a `project` note with status active and the next step |
 | `archive_note` | put the router notes away, don't delete them | the note is in `archive/`, not deleted |
 
 The prompts never name a tool, an id or a file, so the model has to find

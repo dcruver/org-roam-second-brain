@@ -1,0 +1,4 @@
+* Type
+:PROPERTIES:
+:TYPE: person
+:END:

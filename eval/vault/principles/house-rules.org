@@ -1,0 +1,7 @@
+:PROPERTIES:
+:ID:       eval-rules
+:END:
+#+title: House rules
+
+- Shoes off at the door.
+- Whoever cooks does not wash up.
