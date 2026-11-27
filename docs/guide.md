@@ -14,7 +14,6 @@ covers what people ask first.
 - [In Emacs](#in-emacs)
 - [Semantic search](#semantic-search)
 - [The MCP server](#the-mcp-server)
-- [Agenda](#agenda)
 - [Updating a running server](#updating-a-running-server)
 - [The modules](#the-modules)
 
@@ -294,15 +293,6 @@ Diagnostics: `M-x org-roam-mcp-http-sessions` lists live sessions; the
 
 What the server offers an assistant, tool by tool, is on the [tools page](tools.md).
 
-## Agenda
-
-```elisp
-(with-eval-after-load 'org-agenda (orsb-agenda-setup))
-```
-
-adds agenda views over `projects/` and `admin/` and journals TODO state
-changes into the daily note.
-
 ## Updating a running server
 
 ```sh
@@ -326,4 +316,3 @@ re-initialize.
 | `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
 | `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`). `sb/new` creates a note of any type the vault defines, asking for what that type requires; `sb/digest`, `sb/open`, `sb/stale` and `sb/list` show unfinished work and notes by type; `sb/proposals` reviews changes waiting for approval (RET preview, `a` approve, `r` reject); plus the inbox, title search, link suggestions and daily-note linking. It goes through the same tool functions as the MCP server, so the same rules apply. |
 | `orsb-blog.el` | Optional: the `sb/blog-*` commands for a folder of ox-hugo posts (`orsb-blog-directory`), under `C-c b B` once loaded. |
-| `org-agenda-project-tracking.el` | Optional agenda views and TODO journaling (`orsb-agenda-setup`). |

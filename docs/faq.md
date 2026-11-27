@@ -88,6 +88,5 @@ has the details.
 - **A vault other than mine.** It has kept one vault so far. A layout it has not met
   will show rough edges; please open an issue.
 - **TLS.** The server speaks plain HTTP.
-- **The older modules.** `org-roam-vector-search.el` and
-  `org-agenda-project-tracking.el` predate the 2.0 core and are not yet held to the
-  same lint; the agenda views were written for project and admin notes.
+- **The older search module.** `org-roam-vector-search.el` predates the 2.0 core and
+  is not yet held to the same lint.

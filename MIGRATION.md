@@ -75,11 +75,9 @@
   `read_note` reads `data.body` where it read `content`, and passes
   `max_chars` when it needs more than 6,000 characters.
 
-## 2.0 → 2.1: small-model tools (historical)
+## 2.0 → 2.1: small-model tools
 
 Written when the old names could still be switched on; they cannot since 2.2.
-
-## 2.0 → 2.1: small-model tools
 
 2.1 reshapes the tool set for small local models, which have less context and
 pick tools less reliably. The full list is in the README; the changes that can

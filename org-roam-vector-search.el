@@ -4,7 +4,7 @@
 
 ;; Author: Don Cruver
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 2.0.0
+;; Version: 3.1.4
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -25,9 +25,11 @@
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
-;; This package adds vector embedding support and direct AI integration to org-roam.
-;; It stores embeddings as org properties and provides semantic similarity search.
-;; Supports OpenAI-compatible APIs (vLLM, Infinity, etc.) for embeddings and generation.
+;; The embedding primitives (the call to an OpenAI-compatible /embeddings
+;; endpoint, the chunker, cosine similarity), their settings, and the
+;; interactive search commands under C-c v.  The store, the index and the
+;; idle-time worker are in orsb-search.el, which replaces this file's
+;; search and generate entry points when it loads.
 
 ;;; Code:
 
@@ -35,19 +37,8 @@
 (require 'json)
 (require 'url)
 (require 'org)
-(require 'ox-md)
 (require 'cl-lib)
 (require 'subr-x)
-
-;;; Version
-
-(defconst org-roam-semantic-version "1.4.0"
-  "Version of the org-roam-semantic package suite.")
-
-(defun org-roam-semantic-version ()
-  "Display the version of org-roam-semantic."
-  (interactive)
-  (message "org-roam-semantic version %s" org-roam-semantic-version))
 
 ;;; Configuration
 
@@ -64,14 +55,6 @@ This should point to your embedding service. Common values:
   :type 'string
   :group 'org-roam-vector-search)
 
-(defcustom org-roam-semantic-generation-url "http://localhost:8000/v1"
-  "Base URL for text generation API server (OpenAI-compatible).
-This should point to your LLM service. Common values:
-- http://localhost:8000/v1 (vLLM local)
-- http://localhost:11434 (Ollama local)"
-  :type 'string
-  :group 'org-roam-vector-search)
-
 (defcustom org-roam-semantic-embedding-model "nomic-ai/nomic-embed-text-v1.5"
   "Model to use for generating embeddings.
 Must be available in your embedding service.
@@ -79,16 +62,6 @@ Recommended models:
 - nomic-ai/nomic-embed-text-v1.5 (Infinity default)
 - nomic-embed-text (Ollama)
 - BAAI/bge-base-en-v1.5 (good alternative)"
-  :type 'string
-  :group 'org-roam-vector-search)
-
-(defcustom org-roam-semantic-generation-model "casperhansen/llama-3.3-70b-instruct-awq"
-  "Model to use for text generation and AI assistance.
-Must be available in your LLM service.
-Popular models:
-- casperhansen/llama-3.3-70b-instruct-awq (vLLM)
-- llama3.1:8b (Ollama)
-- qwen2.5:7b (Ollama alternative)"
   :type 'string
   :group 'org-roam-vector-search)
 
@@ -107,12 +80,6 @@ Change this only if you switch embedding models."
 (defcustom org-roam-semantic-min-chunk-size 100
   "Minimum word count for a section to get its own embedding.
 Sections smaller than this will not have embeddings generated."
-  :type 'integer
-  :group 'org-roam-vector-search)
-
-(defcustom org-roam-semantic-max-chunk-size 1000
-  "Maximum word count for a single chunk.
-Sections longer than this will be split into smaller chunks."
   :type 'integer
   :group 'org-roam-vector-search)
 
@@ -195,10 +162,6 @@ If CUTOFF is provided, filters results to only include similarities above that t
        (if title
            (concat title ". " content)
          content)))))
-
-(defun org-roam-semantic--vector-magnitude (vector)
-  "Calculate the magnitude of a vector."
-  (sqrt (apply '+ (mapcar (lambda (x) (* x x)) vector))))
 
 (defun org-roam-semantic--cosine-similarity (vec1 vec2)
   "Calculate cosine similarity between two vectors."
@@ -299,30 +262,6 @@ Returns list of (position heading-text content word-count level)."
 
       (nreverse chunks))))
 
-(defun org-roam-semantic--get-chunk-content (file position)
-  "Get the content for a chunk at POSITION in FILE."
-  (with-temp-buffer
-    (insert-file-contents file)
-    (org-mode)
-    (goto-char position)
-    (if (= position (point-min))
-        ;; File-level chunk
-        (org-roam-semantic--get-content file)
-      ;; Section-level chunk
-      (let* ((level (save-excursion
-                      (when (looking-at "^\\(\\*+\\)")
-                        (length (match-string 1)))))
-             (heading-text (save-excursion
-                             (when (looking-at "^\\*+\\s-+\\(.+\\)$")
-                               (match-string 1))))
-             (content-start (progn (forward-line 1) (point)))
-             (content-end (progn
-                            (if (re-search-forward (format "^\\*\\{1,%d\\}\\s-" level) nil t)
-                                (match-beginning 0)
-                              (point-max))))
-             (content (buffer-substring-no-properties content-start content-end)))
-        (concat heading-text ". " content)))))
-
 ;;; OpenAI-Compatible API Functions
 
 (defun org-roam-ai-generate-embedding (text)
@@ -353,39 +292,6 @@ Works with Infinity, vLLM, and other OpenAI-compatible embedding services."
               embedding)))
       (error
        (message "Error calling embeddings API: %s" err)
-       nil))))
-
-(defun org-roam-ai-generate-text (prompt &optional system-prompt)
-  "Call OpenAI-compatible chat completions API synchronously.
-Works with vLLM, OpenAI, and other compatible services."
-  (let* ((messages (if system-prompt
-                       `[((role . "system") (content . ,system-prompt))
-                         ((role . "user") (content . ,prompt))]
-                     `[((role . "user") (content . ,prompt))]))
-         (url-request-method "POST")
-         (url-request-extra-headers '(("Content-Type" . "application/json")))
-         (url-request-data (encode-coding-string
-                            (json-encode `((model . ,org-roam-semantic-generation-model)
-                                         (messages . ,messages)
-                                         (stream . :json-false)))
-                            'utf-8))
-         (url (concat org-roam-semantic-generation-url "/chat/completions")))
-    (condition-case err
-        (with-current-buffer (url-retrieve-synchronously url)
-          (goto-char (point-min))
-          (re-search-forward "^$" nil 'move)
-          (let* ((json-response (decode-coding-string
-                                (buffer-substring (point) (point-max)) 'utf-8))
-                 (data (json-read-from-string json-response))
-                 ;; OpenAI format: {"choices": [{"message": {"content": "..."}}]}
-                 (choices (cdr (assoc 'choices data)))
-                 (first-choice (if (vectorp choices) (aref choices 0) (car choices)))
-                 (message-obj (cdr (assoc 'message first-choice)))
-                 (content (cdr (assoc 'content message-obj))))
-            (kill-buffer (current-buffer))
-            content))
-      (error
-       (message "Error calling chat API: %s" err)
        nil))))
 
 ;;; Embedding Storage and Retrieval
@@ -535,15 +441,7 @@ Returns list of (position heading-text embedding) tuples."
 
       (nreverse embeddings))))
 
-(defun org-roam-semantic--has-embedding-p (file)
-  "Check if note already has chunk embeddings."
-  (not (null (org-roam-semantic--get-all-embeddings file))))
-
 ;;; Main Embedding Functions
-
-(defun org-roam-semantic--generate-embedding (text)
-  "Generate embedding for text synchronously."
-  (org-roam-ai-generate-embedding text))
 
 ;;;###autoload
 (defun org-roam-semantic-generate-embedding (file)
@@ -604,12 +502,6 @@ Returns list of (position heading-text embedding) tuples."
 
     (message "Chunk embedding generation complete for %s: %d processed, %d skipped"
              (file-name-nondirectory file) processed skipped)))
-
-;;;###autoload
-(defun org-roam-semantic-generate-all-embeddings ()
-  "Generate chunk embeddings for all org-roam notes that don't have them."
-  (interactive)
-  (org-roam-semantic-generate-all-chunks))
 
 ;;;###autoload
 (defun org-roam-semantic-generate-all-chunks ()
@@ -816,148 +708,6 @@ All notes above the similarity threshold will be inserted."
             (insert "\n")
             (message "Inserted %d similar note links (similarity >= %.2f)" (length similarities) cutoff))
         (message "No similar notes found above similarity threshold %.2f" cutoff)))))
-
-;;; Status and Maintenance Functions
-
-;;;###autoload
-(defun org-roam-semantic-debug-embedding (file)
-  "Debug embedding for a specific file."
-  (interactive (list (read-file-name "Check embedding for file: "
-                                     org-roam-directory nil t)))
-  (let ((embedding (org-roam-semantic--get-embedding file)))
-    (if embedding
-        (message "File: %s\nEmbedding: %d dimensions\nFirst few values: %s"
-                 (file-name-nondirectory file)
-                 (length embedding)
-                 (mapconcat 'number-to-string
-                           (list (nth 0 embedding) (nth 1 embedding) (nth 2 embedding)
-                                 (nth 3 embedding) (nth 4 embedding)) ", "))
-      (message "File: %s has no embedding" (file-name-nondirectory file)))))
-
-;;;###autoload
-(defun org-roam-semantic-status ()
-  "Show status of vector embeddings in the knowledge base."
-  (interactive)
-  (let* ((all-files (org-roam-list-files))
-         (total-notes (length all-files))
-         (notes-with-embeddings 0)
-         (total-chunks 0)
-         (chunks-with-embeddings 0)
-         (notes-without-embeddings '())
-         (embedding-sizes '()))
-
-    (dolist (file all-files)
-      ;; Count chunks and their embeddings
-      (let ((all-embeddings (org-roam-semantic--get-all-embeddings file)))
-        (let ((chunk-count (length (org-roam-semantic--parse-chunks file))))
-          (setq total-chunks (+ total-chunks chunk-count))
-          (setq chunks-with-embeddings (+ chunks-with-embeddings (length all-embeddings)))
-          (when (> chunk-count 0)
-            (cl-incf notes-with-embeddings))
-          (dolist (chunk-embedding all-embeddings)
-            (push (length (nth 2 chunk-embedding)) embedding-sizes)))))
-
-    (let ((coverage (if (> total-notes 0)
-                       (/ (* 100.0 notes-with-embeddings) total-notes)
-                     0))
-          (chunk-coverage (if (> total-chunks 0)
-                             (/ (* 100.0 chunks-with-embeddings) total-chunks)
-                           0))
-          (unique-sizes (seq-uniq embedding-sizes)))
-
-      (message "Vector Search Status: %d/%d files with chunks, %d/%d total chunks (%.1f%%) have embeddings. Sizes: %s"
-               notes-with-embeddings total-notes
-               chunks-with-embeddings total-chunks chunk-coverage unique-sizes)
-      (with-current-buffer (get-buffer-create "*Embedding Status*")
-        (erase-buffer)
-        (insert (format "Chunk Embedding Coverage: %d/%d files have chunks, %d/%d chunks (%.1f%%) embedded\n"
-                       notes-with-embeddings total-notes
-                       chunks-with-embeddings total-chunks chunk-coverage))
-        (insert (format "Embedding dimensions found: %s\n\n" unique-sizes))
-        (display-buffer (current-buffer))))))
-
-;;;;;; Minimal org → Markdown for n8n (ox-md), safe for files with leading drawers
-
-(require 'org)
-(require 'ox-md)
-
-(defun org-roam-semantic--org-md-wrap-if-needed ()
-  "If buffer has no headlines or starts with a :PROPERTIES: drawer,
-wrap contents under a synthetic top-level heading using #+title or filename."
-  (save-excursion
-    (goto-char (point-min))
-    (let* ((has-heading (save-excursion (re-search-forward org-heading-regexp nil t)))
-           (starts-with-drawer (looking-at-p "\\`\\s-*:PROPERTIES:\\s-*\n")))
-      (when (or (not has-heading) starts-with-drawer)
-        (let* ((title (or (cadr (assoc "TITLE" (org-collect-keywords '("title"))))
-                          (file-name-base (or buffer-file-name "note"))))
-               (content (buffer-string)))
-          (erase-buffer)
-          (insert "* " title "\n\n" content))))))
-
-(defun org-roam-semantic--org-strip-property-drawers ()
-  "Remove all :PROPERTIES:…:END: drawers anywhere in the buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((rx (rx line-start (* blank) ":PROPERTIES:" (* blank) "\n"
-                  (*? anything)
-                  line-start (* blank) ":END:" (* blank) "\n")))
-      (while (re-search-forward rx nil t)
-        (replace-match "" t t)))))
-
-(defun org-roam-semantic--with-org-file (org-file thunk)
-  "Open ORG-FILE into a temp org buffer and run THUNK there."
-  (unless (and org-file (file-readable-p org-file))
-    (error "File not found or unreadable: %s" org-file))
-  (with-temp-buffer
-    (insert-file-contents org-file)
-    (let ((default-directory (file-name-directory org-file)))
-      (delay-mode-hooks (org-mode)))
-    (org-roam-semantic--org-md-wrap-if-needed)
-    (org-roam-semantic--org-strip-property-drawers)
-    (let ((org-export-use-babel nil)
-          (org-confirm-babel-evaluate nil)
-          (org-export-with-broken-links 'mark)
-          (org-export-with-toc nil)
-          (org-export-with-section-numbers nil)
-          (org-export-with-author nil)
-          (org-export-with-creator nil)
-          (org-export-with-email nil)
-          (org-export-with-date nil)
-          ;; also tell Org not to export any drawers (LOGBOOK, etc.)
-          (org-export-with-drawers nil))
-      (funcall thunk))))
-
-(defun org-roam-semantic--export-md-string (org-file)
-  "Export ORG-FILE to Markdown and return it as a Lisp string."
-  (org-roam-semantic--with-org-file
-   org-file
-   (lambda ()
-     ;; (org-export-as BACKEND SUBTREEP VISIBLE-ONLY BODY-ONLY EXT-PLIST)
-     (org-export-as 'md nil nil t '(:explicit-links t)))))
-
-(defun org-roam-semantic--temp-md-path (org-file)
-  "Deterministic-but-unique temp filename for ORG-FILE."
-  (let* ((abs (expand-file-name org-file))
-         (mtime (or (nth 5 (file-attributes abs)) (current-time)))
-         (sig  (secure-hash 'sha1 (format "%s::%s" abs mtime))))
-    (expand-file-name (format "orgmd-%s.md" sig) temporary-file-directory)))
-
-(defun org-roam-semantic--export-md-tempfile (org-file)
-  "Export ORG-FILE to a deterministic temp file and return the path."
-  (let* ((out (org-roam-semantic--temp-md-path org-file))
-         (md  (org-roam-semantic--export-md-string org-file)))
-    (with-temp-file out (insert md))
-    out))
-
-(defun org-roam-semantic--export-md-read-delete (org-file)
-  "Export ORG-FILE, read result, delete temp, return Markdown as Lisp string."
-  (let* ((path (org-roam-semantic--export-md-tempfile org-file))
-         (contents (with-temp-buffer
-                     (insert-file-contents path)
-                     (buffer-string))))
-    (ignore-errors (delete-file path))
-    contents))
 
 ;;; Auto-embedding hook
 (defun org-roam-semantic--update-on-save ()

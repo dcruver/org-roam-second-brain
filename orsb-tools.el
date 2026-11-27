@@ -1,9 +1,9 @@
-;;; orsb-tools.el --- The 2.0 MCP tool contract -*- lexical-binding: t; -*-
+;;; orsb-tools.el --- The MCP tool contract -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.3
+;; Version: 3.1.4
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -27,7 +27,7 @@
 
 ;;; Commentary:
 
-;; Nineteen MCP tools sized for small local models, with one identifier
+;; The MCP tools, sized for small local models, with one identifier
 ;; parameter (`id': an org-roam id, a vault path, an exact title, or a day
 ;; for a daily note), one response envelope
 ;;
@@ -92,7 +92,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.1.3")
+(defconst orsb-tools-version "3.1.4")
 
 ;;;; Argument helpers
 

@@ -5,7 +5,7 @@ a tool or a command that works differently, are marked **Changed**.
 [MIGRATION.md](MIGRATION.md) maps the tools and arguments of earlier versions onto the
 current ones.
 
-## Unreleased
+## 3.1.4 (2026-11-27)
 
 - The package states its licence: GPL-3.0-or-later, in `LICENSE` and in each file's
   header.
@@ -16,6 +16,19 @@ current ones.
   (`demo/record.sh`).
 - `org-roam-second-brain.el` and `org-roam-vector-search.el` declare Emacs 29.1, which
   the package has needed since 2.0.
+- **Changed:** `org-agenda-project-tracking.el` is removed. It was optional agenda
+  views and TODO journaling from before 2.0, and nothing else in the package used it.
+  If you call `orsb-agenda-setup`, keep a copy of the file from v3.1.3 in your own
+  configuration.
+- **Changed:** code nothing used is removed from `org-roam-vector-search.el`: the
+  text-generation call and its settings (`org-roam-semantic-generation-url`,
+  `-generation-model`), `org-roam-semantic-max-chunk-size`, the Markdown export
+  helpers, and the commands `org-roam-semantic-status`, `-debug-embedding`,
+  `-generate-all-embeddings` and `-version`. Search and the `C-c v` commands are
+  unchanged.
+- Fixed: `make reload` loaded `org-roam-api`, a file removed in 2.0; it now reloads the
+  current modules and restarts the server.
+- Every file's header carries the release's version.
 
 ## 3.1.3 (2026-11-26)
 

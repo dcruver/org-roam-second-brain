@@ -4,7 +4,7 @@
 
 ;; Author: Don Cruver
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 3.1.3
+;; Version: 3.1.4
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -25,16 +25,16 @@
 ;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
-;; Second Brain functionality for org-roam providing:
-;; - Structured node types (person, project, idea, admin)
-;; - Proactive surfacing (daily digest, stale projects, pending followups)
-;; - Semantic link suggestions (via org-roam-vector-search)
-;; - Interactive commands for Emacs-first workflow
+;; The human side of the second brain: `orsb-mode' and its commands.
+;; - `sb/new' creates a note of any type the vault defines (a folder with a
+;;   _schema.org), asking for what that type requires
+;; - `sb/digest', `sb/open', `sb/stale' and `sb/list' show unfinished work
+;;   and notes by type
+;; - `sb/proposals' reviews the changes waiting for approval
+;; - the inbox, title search, link suggestions and daily-note linking
 ;;
-;; This package provides both interactive commands for direct Emacs use
-;; and core functions that can be wrapped by API layers.
-;;
-;; Also includes org-roam-api.el for MCP server integration.
+;; The commands go through the tool functions of orsb-tools.el, as the MCP
+;; server (org-roam-mcp-http.el) does, so the vault's rules apply to both.
 
 ;;; Code:
 

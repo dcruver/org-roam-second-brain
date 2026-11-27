@@ -93,7 +93,7 @@ Emacs 29's own `package-vc`:
 ```
 
 Update with `doom sync -u`, `M-x straight-pull-package` or `M-x package-vc-upgrade`.
-A particular release is a tag, `v3.1.3` for example; the
+A particular release is a tag, `v3.1.4` for example; the
 [releases](https://github.com/dcruver/org-roam-second-brain/releases) say what each
 one changed. It is not on MELPA yet.
 

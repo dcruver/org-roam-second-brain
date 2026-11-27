@@ -4,15 +4,14 @@ EMACS ?= emacs
 ORSB_DEPS ?= $(firstword $(wildcard $(HOME)/.config/emacs/.local/straight/build-*/))
 export ORSB_DEPS
 
-SOURCES := orsb-core.el orsb-schema.el orsb-embed-cache.el orsb-search.el orsb-tools.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el orsb-blog.el org-agenda-project-tracking.el
+SOURCES := orsb-core.el orsb-schema.el orsb-embed-cache.el orsb-search.el orsb-tools.el org-roam-mcp-http.el org-roam-vector-search.el org-roam-second-brain.el orsb-blog.el
 
 .PHONY: test lint compile clean reload eval eval-selfcheck
 
 test:
 	$(EMACS) -Q --batch -l test/run.el
 
-# Files held to warnings-as-errors. Legacy files join this list as they are
-# migrated onto orsb-core (see docs: Phase 5 of the 2.0 plan).
+# Files held to warnings-as-errors.
 STRICT := orsb-core.el orsb-schema.el orsb-embed-cache.el orsb-search.el orsb-tools.el
 
 LOADPATH := --eval '(dolist (dir (split-string (or (getenv "ORSB_DEPS") "") ":" t)) (dolist (sub (directory-files (expand-file-name dir) t "\\`[^.]")) (when (and (file-directory-p sub) (not (string-match-p "org-roam-second-brain" sub))) (add-to-list (quote load-path) sub t))))' --eval '(unless (locate-library "org-roam") (require (quote package)) (package-initialize))' --eval '(require (quote org-roam))'
@@ -34,7 +33,7 @@ clean:
 # Reload the package in a running Emacs server (SERVER is the socket path).
 SERVER ?= $(HOME)/emacs-server/server
 reload:
-	emacsclient -s $(SERVER) --eval '(progn (dolist (f (list "orsb-core" "org-roam-api" "org-roam-mcp-http")) (load f)) (org-roam-mcp-http-stop) (org-roam-mcp-http-start org-roam-mcp-http--port) (hash-table-count org-roam-mcp-http--tools))'
+	emacsclient -s $(SERVER) --eval '(progn (dolist (f (list "orsb-core" "orsb-schema" "orsb-embed-cache" "org-roam-vector-search" "orsb-search" "orsb-tools" "org-roam-mcp-http" "org-roam-second-brain")) (load f)) (orsb-mcp-stop) (orsb-mcp-start) (hash-table-count org-roam-mcp-http--tools))'
 
 # Small-model chores (eval/README.md).  Point it at a model with, e.g.
 #   make eval EVAL_ARGS="--base-url http://localhost:8080/v1 --model qwen3.8-27b"
