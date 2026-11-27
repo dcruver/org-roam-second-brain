@@ -31,5 +31,5 @@ jobs:
         run: make test ORSB_DEPS=""
       - name: Byte-compile (warnings shown)
         run: make compile ORSB_DEPS=""
-      - name: Lint (warnings are errors for the orsb-* modules)
+      - name: Lint (warnings are errors)
         run: make lint ORSB_DEPS=""

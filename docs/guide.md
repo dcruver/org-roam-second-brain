@@ -63,8 +63,8 @@ Everything environment-specific is a defcustom in the `orsb` group:
 ;; days without a change before unfinished work counts as stale
 (setq orsb-stale-days 5)
 ;; semantic search (any OpenAI-compatible /embeddings endpoint, e.g. Ollama or Infinity)
-(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
-      org-roam-semantic-embedding-model "nomic-embed-text")
+(setq orsb-embedding-url "http://localhost:11434/v1"
+      orsb-embedding-model "nomic-embed-text")
 ```
 
 ## Vault layout
@@ -195,14 +195,12 @@ tool functions as the MCP server, so the vault's rules apply to them too.
 | `C-c b /` | `sb/search` | title search |
 | `C-c b L` | `sb/suggest-links` | notes close in meaning to this one that it does not link yet |
 | `C-c b D l`, `L`, `c` | `sb/daily-link`, `-link-all`, `-connections` | link a daily note to the notes it mentions |
-| `C-c v s` | `org-roam-semantic-search` | search by meaning |
-| `C-c v i`, `C-c v r` | `org-roam-semantic-insert-similar`, `-insert-related` | insert links to similar notes |
+| `C-c v s` | `orsb-search-notes` | search by meaning: the closest sections, each a link to its note |
+| `C-c v i`, `C-c v r` | `orsb-search-insert-similar`, `-insert-related` | insert links to notes similar to this one, or to a phrase |
+| `C-c v g`, `C-c v G` | `orsb-search-generate-buffer`, `-generate-all` | embed this note, or the whole vault, now |
 
 In a listing, `n` and `p` move, `RET` opens, `g` refreshes, `i` copies a link and `q`
 quits. Two idle seconds after Emacs starts, `orsb-mode` shows the digest once.
-
-`orsb-blog.el` is optional: load it for the `sb/blog-*` commands over a folder of
-ox-hugo posts (`orsb-blog-directory`), under `C-c b B`.
 
 ## Semantic search
 
@@ -213,9 +211,8 @@ ollama pull nomic-embed-text
 ```
 
 ```elisp
-(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
-      org-roam-semantic-embedding-model "nomic-embed-text"
-      org-roam-semantic-embedding-dimensions 768)
+(setq orsb-embedding-url "http://localhost:11434/v1"
+      orsb-embedding-model "nomic-embed-text")
 ```
 
 Vectors are kept in `~/.cache/org-roam-second-brain/embeddings.db`
@@ -243,7 +240,7 @@ updated_at    when it was embedded (ISO 8601, UTC)
 Saving a note queues it; an idle-time worker re-embeds only the chunks whose
 text changed, and writes nothing to the note except an `:ID:` the first time
 a heading is embedded (its key). Queries read an in-memory index loaded from
-the cache. Changing `org-roam-semantic-embedding-model` makes every chunk
+the cache. Changing `orsb-embedding-model` makes every chunk
 stale for the new model; old rows keep serving the old model until
 `M-x orsb-search-prune-cache` removes them (along with rows for nodes that no
 longer exist). The file is a cache: delete it and
@@ -307,12 +304,10 @@ re-initialize.
 
 | Module | What it is |
 |---|---|
-| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
+| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups. |
 | `orsb-tools.el` | The 22-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, the vault's own rules applied to every write, proposals, and an undo journal behind every write. `MIGRATION.md` maps the tool names of earlier versions onto these. |
 | `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
 | `orsb-schema.el` | Note types and their rules, read from the vault's `_schema.org` files: inheritance down the folders, the check of existing notes, the rules a write must keep. Needs no org-roam database. |
 | `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
-| `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
-| `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
+| `orsb-search.el` | Semantic search: the call to the embeddings endpoint, the chunker, stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
 | `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`). `sb/new` creates a note of any type the vault defines, asking for what that type requires; `sb/digest`, `sb/open`, `sb/stale` and `sb/list` show unfinished work and notes by type; `sb/proposals` reviews changes waiting for approval (RET preview, `a` approve, `r` reject); plus the inbox, title search, link suggestions and daily-note linking. It goes through the same tool functions as the MCP server, so the same rules apply. |
-| `orsb-blog.el` | Optional: the `sb/blog-*` commands for a folder of ox-hugo posts (`orsb-blog-directory`), under `C-c b B` once loaded. |

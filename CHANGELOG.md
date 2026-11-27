@@ -5,6 +5,29 @@ a tool or a command that works differently, are marked **Changed**.
 [MIGRATION.md](MIGRATION.md) maps the tools and arguments of earlier versions onto the
 current ones.
 
+## 3.2.0 (2026-11-27)
+
+The package is now seven files, all on the current design and all held to the same
+lint. [MIGRATION.md](MIGRATION.md) has the configuration changes.
+
+- **Changed:** `org-roam-vector-search.el` is removed. What search still used from it
+  (the embeddings call, the chunker) is in `orsb-search.el`; the in-note embedding
+  code from 1.x is gone. The options are renamed `orsb-embedding-url`,
+  `orsb-embedding-model`, `orsb-search-min-chunk-words` and
+  `orsb-search-similarity-cutoff`; the old names still work, with a warning. The
+  defaults are now Ollama's.
+- **Changed:** the `C-c v` commands are `orsb-search-notes`,
+  `orsb-search-insert-similar`, `orsb-search-insert-related`,
+  `orsb-search-generate-buffer` and `orsb-search-generate-all`. `C-c v c` is gone;
+  `C-c v s` always shows the matching section.
+- **Changed:** `orsb-blog.el` is removed. A blog post is a note like any other: its
+  folder's `_schema.org` supplies the export properties, and ox-hugo exports it.
+- Fixed: embedding gave the headings of a `_schema.org` an `:ID:`, which made them
+  notes that search could return. Schema files are now left alone. Remove ids already
+  written from your schema files by hand, then run `M-x orsb-search-prune-cache`.
+- Fixed: `sb/daily-link-all` ignored the similarity threshold given with a prefix
+  argument, and looked in `daily/` whatever `orsb-daily-directory` said.
+
 ## 3.1.4 (2026-11-27)
 
 - The package states its licence: GPL-3.0-or-later, in `LICENSE` and in each file's

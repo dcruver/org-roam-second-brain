@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -27,8 +27,8 @@
 
 ;;; Commentary:
 
-;; Builds on the embedding primitives in `org-roam-vector-search.el' (the
-;; OpenAI-compatible call, the chunk parser) and adds:
+;; Semantic search: the call to an OpenAI-compatible /embeddings endpoint,
+;; the chunker that splits a note at its headings, and on top of them:
 ;;
 ;; - A cache beside the notes.  Vectors live in the SQLite file managed by
 ;;   `orsb-embed-cache', keyed by the org-roam :ID: of the heading they
@@ -56,8 +56,11 @@
 (require 'org)
 (require 'org-id)
 (require 'org-roam)
-(require 'org-roam-vector-search)
+(require 'json)
+(require 'url)
+(require 'cl-lib)
 (require 'orsb-embed-cache)
+(require 'orsb-schema)
 (require 'seq)
 (require 'subr-x)
 
@@ -80,15 +83,207 @@ Only read by the migration from in-note vectors, and removed by
   :type 'string
   :group 'orsb-search)
 
+;;;; The embeddings endpoint
+
+(define-obsolete-variable-alias 'org-roam-semantic-embedding-url 'orsb-embedding-url "3.2.0")
+(define-obsolete-variable-alias 'org-roam-semantic-embedding-model 'orsb-embedding-model "3.2.0")
+(define-obsolete-variable-alias 'org-roam-semantic-min-chunk-size 'orsb-search-min-chunk-words "3.2.0")
+(define-obsolete-variable-alias 'org-roam-semantic-similarity-cutoff 'orsb-search-similarity-cutoff "3.2.0")
+
+(defcustom orsb-embedding-url "http://localhost:11434/v1"
+  "Base URL of an OpenAI-compatible embeddings service.
+\"/embeddings\" is appended to it.  The default is Ollama on this machine."
+  :type 'string
+  :group 'orsb-search)
+
+(defcustom orsb-embedding-model "nomic-embed-text"
+  "The embedding model to ask the service for.
+Changing it makes every stored vector stale for the new model."
+  :type 'string
+  :group 'orsb-search)
+
+(defcustom orsb-search-min-chunk-words 100
+  "Words a section needs before it gets an embedding of its own."
+  :type 'integer
+  :group 'orsb-search)
+
+(defcustom orsb-search-similarity-cutoff 0.55
+  "Lowest similarity `orsb-search-insert-similar' still inserts a link for."
+  :type 'float
+  :group 'orsb-search)
+
+;;;; Primitives
+
+(defun orsb-search--normalize (text)
+  "Normalize text for embedding by removing extra whitespace and formatting."
+  (when text
+    (let ((normalized (replace-regexp-in-string "[ \t\n\r]+" " " text)))
+      (string-trim normalized))))
+
+(defun orsb-search--cosine (vec1 vec2)
+  "Calculate cosine similarity between two vectors."
+  (condition-case err
+      (when (and vec1 vec2
+                 (listp vec1) (listp vec2)
+                 (= (length vec1) (length vec2))
+                 (> (length vec1) 0))
+        (let* ((dot-product 0.0)
+               (mag1-sq 0.0)
+               (mag2-sq 0.0)
+               (valid-count 0))
+          ;; Calculate dot product and magnitudes in one pass
+          (dotimes (i (length vec1))
+            (let ((v1 (nth i vec1))
+                  (v2 (nth i vec2)))
+              (when (and (numberp v1) (numberp v2))
+                (setq dot-product (+ dot-product (* v1 v2)))
+                (setq mag1-sq (+ mag1-sq (* v1 v1)))
+                (setq mag2-sq (+ mag2-sq (* v2 v2)))
+                (setq valid-count (1+ valid-count)))))
+          ;; Only calculate if we have valid numbers
+          (when (> valid-count 0)
+            (let ((mag1 (sqrt mag1-sq))
+                  (mag2 (sqrt mag2-sq)))
+              (if (or (zerop mag1) (zerop mag2))
+                  0.0
+                (/ dot-product (* mag1 mag2)))))))
+    (error
+     (message "Error in cosine similarity calculation: %s" err)
+     nil)))
+
+(defun orsb-search--count-words (text)
+  "Count words in TEXT."
+  (length (split-string (orsb-search--normalize text) "\\s-+" t)))
+
+(defun orsb-search--parse-chunks (file)
+  "Parse FILE and return list of chunks with metadata.
+Returns list of (position heading-text content word-count level)."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (org-mode)
+    (let ((chunks '()))
+      (goto-char (point-min))
+      (let ((heading-count 0))
+        (while (re-search-forward "^\\*+ " nil t)
+          (save-excursion
+            (beginning-of-line)
+            (when (org-at-heading-p)
+              (cl-incf heading-count)
+              (let* ((heading-pos (point))
+                     (heading-components (org-heading-components))
+                     (heading-text (nth 4 heading-components))
+                     (level (nth 0 heading-components))
+                     (content-start (progn
+                                      (forward-line 1)
+                                      (point)))
+                     (content-end (save-excursion
+                                    (if (outline-next-heading)
+                                        (point)
+                                      (point-max))))
+                     (content (buffer-substring-no-properties content-start content-end))
+                     (full-content (concat heading-text ". " content))
+                     (word-count (orsb-search--count-words full-content)))
+
+                ;; Include all chunks - mark those below threshold differently
+                (if (>= word-count orsb-search-min-chunk-words)
+                    (push (list heading-pos heading-text full-content word-count level :embedding) chunks)
+                  (push (list heading-pos heading-text full-content word-count level :id-only) chunks)))))))
+      (nreverse chunks))))
+
+(defun orsb-search-embed (text)
+  "Call OpenAI-compatible embeddings API synchronously.
+Works with Infinity, vLLM, and other OpenAI-compatible embedding services."
+  (let ((url-request-method "POST")
+        (url-request-extra-headers '(("Content-Type" . "application/json")))
+        (url-request-data (encode-coding-string
+                           (json-encode `((model . ,orsb-embedding-model)
+                                        (input . ,text)))
+                           'utf-8))
+        (url (concat orsb-embedding-url "/embeddings")))
+    (condition-case err
+        (with-current-buffer (url-retrieve-synchronously url)
+          (goto-char (point-min))
+          (re-search-forward "^$" nil 'move)
+          (let* ((json-response (decode-coding-string
+                                (buffer-substring (point) (point-max)) 'utf-8))
+                 (data (json-read-from-string json-response))
+                 ;; OpenAI format: {"data": [{"embedding": [...]}]}
+                 (data-array (cdr (assoc 'data data)))
+                 (first-result (if (vectorp data-array) (aref data-array 0) (car data-array)))
+                 (embedding (cdr (assoc 'embedding first-result))))
+            (kill-buffer (current-buffer))
+            ;; Convert vector to list if necessary
+            (if (vectorp embedding)
+                (append embedding nil)
+              embedding)))
+      (error
+       (message "Error calling embeddings API: %s" err)
+       nil))))
+
+(defun orsb-search--note-text (file)
+  "Extract content including title, properly skipping all front matter."
+  (with-temp-buffer
+    (insert-file-contents file)
+
+    (let (title content)
+      ;; Extract title
+      (goto-char (point-min))
+      (when (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
+        (setq title (match-string 1)))
+
+      ;; Skip to after properties drawer
+      (goto-char (point-min))
+      (when (re-search-forward "^:END:" nil t)
+        (forward-line 1))
+
+      ;; Skip ALL keyword lines (#+title:, #+filetags:, etc.)
+      (while (and (not (eobp))
+                  (looking-at "^#\\+[a-zA-Z_-]+:"))
+        (forward-line 1))
+
+      ;; Skip blank lines
+      (while (and (not (eobp))
+                  (looking-at "^\\s-*$"))
+        (forward-line 1))
+
+      ;; Get actual content
+      (setq content (buffer-substring-no-properties (point) (point-max)))
+
+      (orsb-search--normalize
+       (if title
+           (concat title ". " content)
+         content)))))
+
+(defun orsb-search--file-title (file)
+  "Extract the title from an org-roam note file."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (if (re-search-forward "^#\\+title:\\s-*\\(.+\\)$" nil t)
+            (string-trim (match-string 1))
+          (file-name-sans-extension (file-name-nondirectory file))))
+    (error (file-name-sans-extension (file-name-nondirectory file)))))
+
+(defun orsb-search--file-id (file)
+  "Extract the node ID from an org-roam note file."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (re-search-forward "^:ID:\\s-*\\(.+\\)$" nil t)
+          (string-trim (match-string 1))))
+    (error nil)))
+
 (defun orsb-search--model ()
   "The embedding model rows are written and read for."
-  org-roam-semantic-embedding-model)
+  orsb-embedding-model)
 
 ;;;; Chunks on disk
 
 (defun orsb-search--chunk-hash (text)
   "The stale-detection hash of chunk TEXT."
-  (sha1 (or (org-roam-semantic--normalize-text text) "")))
+  (sha1 (or (orsb-search--normalize text) "")))
 
 (defun orsb-search--parse-vector (string)
   "Parse a space-separated float STRING into a list, or nil."
@@ -171,14 +366,14 @@ embedded and hashed, and its word count (not the parser's, which counts
 drawer lines) decides whether the chunk is embedded or only gets an id.
 ID is the heading's :ID:, the chunk's key in the cache, or nil."
   (let* ((parsed (let ((inhibit-message t) (message-log-max nil))
-                   (org-roam-semantic--parse-chunks file)))
+                   (orsb-search--parse-chunks file)))
          (ids (orsb-search--heading-ids file (mapcar #'car parsed))))
     (cl-mapcar (lambda (c id)
                  (let ((text (orsb-search--strip-drawers (nth 2 c))))
                    (list (nth 0 c) (nth 1 c) text
                          (orsb-search--chunk-hash text)
-                         (>= (org-roam-semantic--count-words text)
-                             org-roam-semantic-min-chunk-size)
+                         (>= (orsb-search--count-words text)
+                             orsb-search-min-chunk-words)
                          id)))
                parsed ids)))
 
@@ -232,17 +427,24 @@ Returns non-nil when the file was written."
                (when (org-at-heading-p)
                  (unless (org-get-property-block) (org-insert-property-drawer))
                  (unless (org-entry-get (point) "ID")
-                   (org-entry-put (point) "ID" (org-roam-semantic--generate-chunk-id)))))))
+                   (org-entry-put (point) "ID" (org-id-new)))))))
           (when (orsb-search--save file)
             ;; new ids are new nodes, and every later heading moved
             (ignore-errors (org-roam-db-update-file file))
             t))))))
 
+(defun orsb-search--not-a-note-p (file)
+  "Non-nil when FILE is a schema file: rules about notes, not a note.
+Embedding it would give its headings ids, and so make them notes."
+  (equal (file-name-nondirectory file) orsb-schema-file-name))
+
 (defun orsb-search-generate-file (file &optional force)
   "Embed the chunks of FILE whose text changed (all of them with FORCE).
 Vectors go to the cache; the note itself changes only when a heading
-first needs an :ID:.  Returns (GENERATED . SKIPPED)."
-  (let ((chunks (orsb-search--current-chunks file)))
+first needs an :ID:.  A schema file is left alone.
+Returns (GENERATED . SKIPPED)."
+  (let ((chunks (unless (orsb-search--not-a-note-p file)
+                  (orsb-search--current-chunks file))))
     (when (orsb-search--ensure-ids file chunks)
       (setq chunks (orsb-search--current-chunks file)))
     (let* ((model (orsb-search--model))
@@ -253,7 +455,7 @@ first needs an :ID:.  Returns (GENERATED . SKIPPED)."
         (pcase-let ((`(,_pos ,heading ,text ,hash ,_embed-p ,id) c))
           (if (null id)
               (message "orsb-search: %S in %s has no :ID: yet, not embedded" heading (file-name-nondirectory file))
-            (let ((embedding (org-roam-ai-generate-embedding text)))
+            (let ((embedding (orsb-search-embed text)))
               (if embedding
                   (progn (orsb-embed-cache-put id embedding hash model)
                          (orsb-search--index-put id embedding)
@@ -393,7 +595,8 @@ Returns the number of rows removed."
 
 (defun orsb-search-enqueue (file)
   "Queue FILE for (re)embedding when Emacs is idle."
-  (when (and file (not orsb-search--inhibit-hooks) (org-roam-file-p file))
+  (when (and file (not orsb-search--inhibit-hooks) (org-roam-file-p file)
+             (not (orsb-search--not-a-note-p file)))
     (let ((file (file-truename file)))
       (unless (member file orsb-search--queue)
         (setq orsb-search--queue (append orsb-search--queue (list file))))
@@ -423,9 +626,6 @@ Returns the number of rows removed."
   (when (and (derived-mode-p 'org-mode) (buffer-file-name) (org-roam-file-p))
     (orsb-search-enqueue (buffer-file-name))))
 
-;; The legacy hook embedded synchronously on every save (and did so before
-;; the save, so a fresh file was not on disk yet); replace it.
-(remove-hook 'before-save-hook 'org-roam-semantic--update-on-save)
 (add-hook 'after-save-hook #'orsb-search--after-save)
 
 ;;;; Index
@@ -490,17 +690,16 @@ files whose chunks are skipped.  Each hit is (FILE SCORE POSITION HEADING)."
     (dolist (node (orsb-search--nodes))
       (when-let ((c (orsb-search--node-chunk node)))
         (unless (and skip (member (file-truename (nth 1 node)) skip))
-          (let ((score (org-roam-semantic--cosine-similarity qv (nth 2 c))))
+          (let ((score (orsb-search--cosine qv (nth 2 c))))
             (when (and score (>= score cutoff))
               (push (list (nth 1 node) score (nth 0 c) (nth 1 c)) hits))))))
     (seq-take (sort hits (lambda (a b) (> (cadr a) (cadr b)))) limit)))
 
 (defun orsb-search-similar (query &optional limit cutoff)
   "Chunks most similar to QUERY, best first, at most LIMIT with score >= CUTOFF.
-Each hit is (FILE SCORE POSITION HEADING), the shape of
-`org-roam-semantic-get-similar-data', but read from the index.
+Each hit is (FILE SCORE POSITION HEADING).
 Signals an error when the embedding service is unreachable."
-  (let ((qv (org-roam-ai-generate-embedding query)))
+  (let ((qv (orsb-search-embed query)))
     (unless qv (error "Embedding service returned nothing for the query"))
     (orsb-search-similar-vector qv limit cutoff)))
 
@@ -573,36 +772,88 @@ QUERY's first word occurs in it, the snippet is taken around it."
         (setq chunks (1+ chunks))))
     (cons (hash-table-count files) chunks)))
 
-;;;; Legacy entry points
+;;;; Commands (C-c v, bound by `orsb-mode')
 
-;; The commands in `org-roam-vector-search.el' (C-c v g, the similar-note
-;; inserts, `sb/' note creation) still read and write :EMBEDDING:
-;; properties.  Point them at the cache so nothing writes vectors into a
-;; note again and nothing searches the old copies.
-
-(defun orsb-search--legacy-similar (query-text &optional limit cutoff)
-  "Cache-backed `org-roam-semantic-get-similar-data' for QUERY-TEXT.
-LIMIT and CUTOFF as there; returns nil (not an error) when the embedding
-service is unreachable, as the original did."
+(defun orsb-search--similar-or-nil (query-text &optional limit cutoff)
+  "`orsb-search-similar' for QUERY-TEXT with LIMIT and CUTOFF.
+Returns nil, with a message, when the embedding service does not answer."
   (condition-case err
       (orsb-search-similar query-text (or limit 10) (if (numberp cutoff) cutoff 0.0))
     (error (message "orsb-search: %s" (error-message-string err)) nil)))
 
-(defun orsb-search--legacy-generate (file)
-  "Cache-backed `org-roam-semantic-generate-chunks-for-file' for FILE."
-  (interactive (list (buffer-file-name)))
-  (unless file (error "No file associated with current buffer"))
-  (orsb-search-generate-file file))
+(defun orsb-search--insert-links (hits)
+  "Insert one link line per file in HITS, best first."
+  (let (seen)
+    (dolist (hit hits)
+      (let ((file (car hit)))
+        (unless (member file seen)
+          (push file seen)
+          (let ((title (orsb-search--file-title file))
+                (id (orsb-search--file-id file)))
+            (insert (if id
+                        (format "- [[id:%s][%s]] (%.3f)\n" id title (cadr hit))
+                      (format "- [[file:%s][%s]] (%.3f)\n" file title (cadr hit))))))))
+    (length seen)))
 
-(defun orsb-search--legacy-generate-all ()
-  "Cache-backed `org-roam-semantic-generate-all-chunks'."
+;;;###autoload
+(defun orsb-search-notes (query)
+  "Show the sections closest in meaning to QUERY, each a link to its note."
+  (interactive "sSearch by meaning: ")
+  (let ((hits (orsb-search--similar-or-nil query 10)))
+    (if (null hits)
+        (message "Nothing similar found")
+      (with-current-buffer (get-buffer-create "*Similar Notes*")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (org-mode)
+          (insert (format "* Similar to: %s\n\n" query))
+          (dolist (hit hits)
+            (pcase-let ((`(,file ,score ,_pos ,heading) hit))
+              (let ((title (orsb-search--file-title file))
+                    (id (orsb-search--file-id file)))
+                (insert (format "** %.3f  %s%s\n" score
+                                (if id (format "[[id:%s][%s]]" id title) (format "[[file:%s][%s]]" file title))
+                                (if (and heading (not (equal heading title))) (concat " > " heading) "")))))))
+        (goto-char (point-min))
+        (display-buffer (current-buffer))))))
+
+;;;###autoload
+(defun orsb-search-insert-related (query)
+  "Insert links to the notes closest in meaning to QUERY at point."
+  (interactive "sFind notes related to: ")
+  (unless (derived-mode-p 'org-mode) (user-error "Not an org buffer"))
+  (let ((hits (orsb-search--similar-or-nil query 5)))
+    (if (null hits)
+        (message "Nothing similar found")
+      (insert (format "\n** Related Notes - %s\n" query))
+      (message "Inserted %d links" (orsb-search--insert-links hits))
+      (insert "\n"))))
+
+;;;###autoload
+(defun orsb-search-insert-similar (&optional cutoff)
+  "Insert links to the notes similar to the current one at point.
+CUTOFF (the prefix argument) or `orsb-search-similarity-cutoff' is the
+lowest similarity still inserted."
+  (interactive "P")
+  (unless (and (derived-mode-p 'org-mode) (buffer-file-name) (org-roam-file-p))
+    (user-error "Not an org-roam note"))
+  (let* ((file (buffer-file-name))
+         (cutoff (if (numberp cutoff) cutoff orsb-search-similarity-cutoff))
+         (hits (seq-remove (lambda (hit) (file-equal-p (car hit) file))
+                           (orsb-search--similar-or-nil (orsb-search--note-text file) 50 cutoff))))
+    (if (null hits)
+        (message "No notes at similarity %.2f or above" cutoff)
+      (insert (format "\n** Related Notes (similarity >= %.2f)\n" cutoff))
+      (message "Inserted %d links" (orsb-search--insert-links hits))
+      (insert "\n"))))
+
+;;;###autoload
+(defun orsb-search-generate-buffer ()
+  "Embed the sections of the current note whose text changed, now."
   (interactive)
-  (let ((r (orsb-search-generate-all)))
+  (unless (buffer-file-name) (user-error "This buffer visits no file"))
+  (let ((r (orsb-search-generate-file (buffer-file-name))))
     (message "orsb-search: %d embedded, %d already current" (car r) (cdr r))))
-
-(advice-add 'org-roam-semantic-get-similar-data :override #'orsb-search--legacy-similar)
-(advice-add 'org-roam-semantic-generate-chunks-for-file :override #'orsb-search--legacy-generate)
-(advice-add 'org-roam-semantic-generate-all-chunks :override #'orsb-search--legacy-generate-all)
 
 (provide 'orsb-search)
 ;;; orsb-search.el ends here

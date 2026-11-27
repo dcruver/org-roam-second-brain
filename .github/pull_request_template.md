@@ -7,7 +7,7 @@
 See [CONTRIBUTING.md](https://github.com/dcruver/org-roam-second-brain/blob/main/CONTRIBUTING.md) for the details of each.
 
 - [ ] Tests added or changed, and `make test` passes
-- [ ] `make lint` passes (warnings are errors for the `orsb-*` modules)
+- [ ] `make lint` passes (warnings are errors)
 - [ ] If a tool changed: `make eval-selfcheck` passes, and [docs/tools.md](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/tools.md) is updated
 - [ ] [docs/guide.md](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/guide.md) updated if a command, an option or the `_schema.org` format changed
 - [ ] Unreleased section of [CHANGELOG.md](https://github.com/dcruver/org-roam-second-brain/blob/main/CHANGELOG.md) updated, with **Changed** for anything that changes how an existing tool or command works

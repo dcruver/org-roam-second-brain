@@ -88,5 +88,3 @@ has the details.
 - **A vault other than mine.** It has kept one vault so far. A layout it has not met
   will show rough edges; please open an issue.
 - **TLS.** The server speaks plain HTTP.
-- **The older search module.** `org-roam-vector-search.el` predates the 2.0 core and
-  is not yet held to the same lint.

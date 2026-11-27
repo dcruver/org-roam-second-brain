@@ -4,7 +4,7 @@
 
 ;; Author: Don Cruver
 ;; URL: https://github.com/dcruver/org-roam-second-brain
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -39,7 +39,7 @@
 ;;; Code:
 
 (require 'org-roam)
-(require 'org-roam-vector-search)
+(require 'orsb-search)
 (require 'orsb-core)
 (require 'orsb-schema)
 (require 'orsb-tools)
@@ -87,10 +87,10 @@ Disabled by default as it makes an API call on every file open."
 
 (defcustom sb/daily-auto-link-mode 'first-only
   "Controls when daily auto-linking runs.
-- 'first-only: Only add Related Notes on first substantial entry
-- 'adaptive: Update when content changes significantly
-- 'always: Update on every save
-- 'manual: Never auto-link, only manual via sb/daily-link"
+- `first-only': Only add Related Notes on first substantial entry
+- `adaptive': Update when content changes significantly
+- `always': Update on every save
+- `manual': Never auto-link, only manual via sb/daily-link"
   :type '(choice (const :tag "First entry only" first-only)
                  (const :tag "Adaptive" adaptive)
                  (const :tag "Always" always)
@@ -99,9 +99,9 @@ Disabled by default as it makes an API call on every file open."
 
 (defcustom sb/daily-link-types 'both
   "What types of notes dailies should link to.
-- 'both: Link to dailies and concept notes
-- 'dailies-only: Only link to other daily files
-- 'concepts-only: Only link to non-daily org-roam files"
+- `both': Link to dailies and concept notes
+- `dailies-only': Only link to other daily files
+- `concepts-only': Only link to non-daily org-roam files"
   :type '(choice (const :tag "Both" both)
                  (const :tag "Dailies only" dailies-only)
                  (const :tag "Concepts only" concepts-only))
@@ -200,24 +200,6 @@ Disabled by default as it makes an API call on every file open."
                      file))))
       (when id (org-roam-node-from-id id)))))
 
-(defun sb/--generate-embedding (file-path)
-  "Generate embedding for FILE-PATH if org-roam-semantic is available."
-  (condition-case err
-      (when (fboundp 'org-roam-semantic-generate-embedding)
-        (message "Generating embedding for: %s" (file-name-nondirectory file-path))
-        (org-roam-semantic-generate-embedding file-path)
-        ;; Save and close the buffer
-        (let ((buf (find-buffer-visiting file-path)))
-          (when buf
-            (with-current-buffer buf
-              (save-buffer)
-              (kill-buffer))))
-        t)
-    (error
-     (message "Warning: Failed to generate embeddings: %s"
-              (error-message-string err))
-     nil)))
-
 (defun sb/--is-daily-file-p (file)
   "Check if FILE is in the daily directory."
   (and file (string-match-p "/daily/" file)))
@@ -249,12 +231,12 @@ Disabled by default as it makes an API call on every file open."
 (defun sb/core-unlinked-similar (file &optional threshold)
   "Find notes similar to FILE that aren't already linked.
 Returns list of plists with file, title, and similarity."
-  (when (fboundp 'org-roam-semantic-get-similar-data)
+  (when (fboundp 'orsb-search--similar-or-nil)
     (let* ((threshold (or threshold sb/similarity-threshold))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string)))
-           (similar (org-roam-semantic-get-similar-data content 20 threshold))
+           (similar (orsb-search--similar-or-nil content 20 threshold))
            ;; Get existing links from this file
            (existing-links (make-hash-table :test 'equal))
            (node (sb/--node-from-file file)))
@@ -298,13 +280,13 @@ Returns list of plists with file, title, and similarity."
   "Find notes related to daily FILE for auto-linking.
 Returns plist with :concepts and :dailies lists, each containing
 (:file :title :similarity :id) plists."
-  (when (and (fboundp 'org-roam-semantic-get-similar-data)
+  (when (and (fboundp 'orsb-search--similar-or-nil)
              (sb/--is-daily-file-p file))
     (let* ((threshold (or threshold sb/similarity-threshold))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string)))
-           (similar (org-roam-semantic-get-similar-data content 20 threshold))
+           (similar (orsb-search--similar-or-nil content 20 threshold))
            (existing-links (make-hash-table :test 'equal))
            (concepts '())
            (dailies '()))
@@ -316,8 +298,8 @@ Returns plist with :concepts and :dailies lists, each containing
                (similarity (cadr result))
                (is-daily (sb/--is-daily-file-p sim-file)))
           (unless (gethash sim-file existing-links)
-            (let* ((title (org-roam-semantic--get-title sim-file))
-                   (node-id (org-roam-semantic--get-node-id sim-file))
+            (let* ((title (orsb-search--file-title sim-file))
+                   (node-id (orsb-search--file-id sim-file))
                    (entry (list :file sim-file
                                 :title title
                                 :similarity similarity
@@ -362,6 +344,7 @@ Returns plist with :concepts and :dailies lists, each containing
   (use-local-map sb/buffer-mode-map))
 
 ;; Evil mode compatibility
+(declare-function evil-define-key* "evil-core")
 (with-eval-after-load 'evil
   (evil-define-key* '(normal motion) sb/buffer-mode-map
     (kbd "RET") 'sb/buffer-visit-item
@@ -378,7 +361,7 @@ Returns plist with :concepts and :dailies lists, each containing
   "List of items in the current buffer for navigation.")
 
 (defvar-local sb/buffer-type nil
-  "Type of content in buffer: 'digest, 'suggestions, 'followups, 'stale.")
+  "Type of content in buffer, a symbol such as `digest' or `proposals'.")
 
 (defvar-local sb/buffer-source-file nil
   "Source file for suggestion buffers.")
@@ -900,7 +883,7 @@ With prefix arg, prompts for similarity THRESHOLD."
   (let* ((threshold (if threshold
                         (read-number "Similarity threshold: " sb/similarity-threshold)
                       sb/similarity-threshold))
-         (daily-dir (expand-file-name "daily" org-roam-directory))
+         (daily-dir (expand-file-name orsb-daily-directory org-roam-directory))
          (files (directory-files daily-dir t "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org$"))
          (processed 0)
          (linked 0))
@@ -909,7 +892,8 @@ With prefix arg, prompts for similarity THRESHOLD."
       (let ((initial-size (with-temp-buffer
                             (insert-file-contents file)
                             (buffer-size))))
-        (sb/daily-link file)
+        (let ((sb/similarity-threshold threshold))
+          (sb/daily-link file))
         (let ((new-size (with-temp-buffer
                           (insert-file-contents file)
                           (buffer-size))))
@@ -924,7 +908,7 @@ With prefix arg, prompts for similarity THRESHOLD."
 (defun sb/daily-connections ()
   "Show connection report for all daily files."
   (interactive)
-  (let* ((daily-dir (expand-file-name "daily" org-roam-directory))
+  (let* ((daily-dir (expand-file-name orsb-daily-directory org-roam-directory))
          (files (directory-files daily-dir t "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org$"))
          (connections '())
          (buf (get-buffer-create "*Daily Connections*")))
@@ -1045,12 +1029,11 @@ With prefix arg, prompts for similarity THRESHOLD."
 (defvar orsb-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c b") sb/command-map)
-    (define-key map (kbd "C-c v s") 'org-roam-semantic-search)
-    (define-key map (kbd "C-c v i") 'org-roam-semantic-insert-similar)
-    (define-key map (kbd "C-c v r") 'org-roam-semantic-insert-related)
-    (define-key map (kbd "C-c v c") 'org-roam-semantic-search-chunks)
-    (define-key map (kbd "C-c v g") 'org-roam-semantic-generate-chunks-for-file)
-    (define-key map (kbd "C-c v G") 'org-roam-semantic-generate-all-chunks)
+    (define-key map (kbd "C-c v s") 'orsb-search-notes)
+    (define-key map (kbd "C-c v i") 'orsb-search-insert-similar)
+    (define-key map (kbd "C-c v r") 'orsb-search-insert-related)
+    (define-key map (kbd "C-c v g") 'orsb-search-generate-buffer)
+    (define-key map (kbd "C-c v G") 'orsb-search-generate-all)
     map)
   "Keymap of `orsb-mode': C-c b (second brain) and C-c v (semantic search).")
 

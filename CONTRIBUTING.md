@@ -22,7 +22,7 @@ harness (standard library only).
 git clone https://github.com/dcruver/org-roam-second-brain.git && cd org-roam-second-brain
 make test             # ERT against a throwaway vault
 make compile          # byte-compile everything, warnings shown
-make lint             # warnings are errors for the orsb-* modules
+make lint             # warnings are errors, in every file
 make eval-selfcheck   # the known good tool calls pass every chore; doing nothing fails every chore
 ```
 

@@ -93,7 +93,7 @@ Emacs 29's own `package-vc`:
 ```
 
 Update with `doom sync -u`, `M-x straight-pull-package` or `M-x package-vc-upgrade`.
-A particular release is a tag, `v3.1.4` for example; the
+A particular release is a tag, `v3.2.0` for example; the
 [releases](https://github.com/dcruver/org-roam-second-brain/releases) say what each
 one changed. It is not on MELPA yet.
 
@@ -139,8 +139,8 @@ For search by meaning, point it at an embeddings endpoint (Ollama here) and embe
 vault once with `M-x orsb-search-generate-all`:
 
 ```elisp
-(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
-      org-roam-semantic-embedding-model "nomic-embed-text")
+(setq orsb-embedding-url "http://localhost:11434/v1"
+      orsb-embedding-model "nomic-embed-text")
 ```
 
 ## Using it from an AI assistant

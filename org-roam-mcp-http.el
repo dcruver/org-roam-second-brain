@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -42,6 +42,8 @@
 (require 'orsb-core)
 ;; The tool contract.
 (require 'orsb-tools)
+
+(defvar orsb-mcp-tool-timeout)
 
 ;; The port lives in `orsb-mcp-port' (transport section below);
 ;; `org-roam-mcp-http--port' is kept as an alias for old init files.
@@ -164,10 +166,10 @@ Set by `initialize' to the new session so the response carries it.")
   :group 'orsb
   :prefix "orsb-mcp-")
 
+(defvaralias 'org-roam-mcp-http--port 'orsb-mcp-port)
 (defcustom orsb-mcp-port 8007
   "TCP port the MCP server listens on."
   :type 'integer :group 'orsb-mcp)
-(defvaralias 'org-roam-mcp-http--port 'orsb-mcp-port)
 
 (defcustom orsb-mcp-host "127.0.0.1"
   "Address to bind.  \"0.0.0.0\" exposes the server to the network;
@@ -297,7 +299,8 @@ so the HTTP layer puts it in the Mcp-Session-Id response header."
 
 (defun org-roam-mcp-http--dispatch (body)
   "Dispatch a JSON-RPC request from BODY string.
-Return JSON response string, or symbol `notification' for fire-and-forget messages."
+Return the JSON response string, or the symbol `notification' for a
+message that takes no answer."
   (condition-case err
       (let* ((request (json-read-from-string body))
              (id (alist-get 'id request))
@@ -342,7 +345,7 @@ Return JSON response string, or symbol `notification' for fire-and-forget messag
   "The TCP server process.")
 
 (defun org-roam-mcp-http--make-http-response (status content-type body &optional extra-headers)
-  "Create an HTTP response string with STATUS, CONTENT-TYPE, BODY and EXTRA-HEADERS.
+  "An HTTP response string: STATUS, CONTENT-TYPE, BODY and EXTRA-HEADERS.
 The request-scoped `org-roam-mcp-http--session-id', when set, is echoed
 in Mcp-Session-Id."
   (let ((session-header (if org-roam-mcp-http--session-id

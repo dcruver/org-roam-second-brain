@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1") (org-roam "2.2"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -62,7 +62,7 @@
 (declare-function orsb-search-similar-vector "orsb-search")
 (declare-function orsb-search-centroid "orsb-search")
 (declare-function orsb-search-chunk-info "orsb-search")
-(declare-function org-roam-ai-generate-embedding "org-roam-ai")
+(declare-function orsb-search-embed "orsb-search")
 (declare-function orsb-search-file-stale-p "orsb-search")
 (declare-function orsb-search-generate-file "orsb-search")
 (declare-function orsb-search-enqueue "orsb-search")
@@ -92,7 +92,7 @@
   :type '(choice (const :tag "None" nil) string)
   :group 'orsb)
 
-(defconst orsb-tools-version "3.1.4")
+(defconst orsb-tools-version "3.2.0")
 
 ;;;; Argument helpers
 
@@ -606,7 +606,7 @@ the database only; no bodies."
                               (orsb-search-centroid file)
                             (orsb-core--with-node node
                               (orsb-search-centroid file (point) (save-excursion (org-end-of-subtree t t) (point))))))
-                     (org-roam-ai-generate-embedding
+                     (orsb-search-embed
                       (or text (let ((b (concat (org-roam-node-title node) "\n" (orsb-core-node-body node))))
                                  (substring b 0 (min 4000 (length b))))))
                      (error "no vector"))

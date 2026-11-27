@@ -20,7 +20,7 @@
 (defun orsb-search-test--fake-embedding (text)
   "A 4-float vector that depends on TEXT only."
   (setq orsb-search-test--calls (1+ orsb-search-test--calls))
-  (let ((h (sha1 (org-roam-semantic--normalize-text text))))
+  (let ((h (sha1 (orsb-search--normalize text))))
     (mapcar (lambda (i) (/ (float (string-to-number (substring h (* 2 i) (+ 2 (* 2 i))) 16)) 255.0))
             '(0 1 2 3))))
 
@@ -28,8 +28,8 @@
   "Run BODY with the embedding API faked, tiny chunks, and a temp cache db."
   (declare (indent 0))
   `(let ((orsb-search-test--calls 0)
-         (org-roam-semantic-min-chunk-size 3)
-         (org-roam-semantic-embedding-model "fake-model")
+         (orsb-search-min-chunk-words 3)
+         (orsb-embedding-model "fake-model")
          (orsb-embed-cache-file (make-temp-file "orsb-cache-" nil ".db"))
          (orsb-embed-cache--db nil)
          (orsb-embed-cache--db-file nil)
@@ -39,7 +39,7 @@
          (orsb-search--queue nil)
          (orsb-search--timer nil))
      (unwind-protect
-         (cl-letf (((symbol-function 'org-roam-ai-generate-embedding) #'orsb-search-test--fake-embedding))
+         (cl-letf (((symbol-function 'orsb-search-embed) #'orsb-search-test--fake-embedding))
            ,@body)
        (when orsb-search--timer (cancel-timer orsb-search--timer))
        (orsb-embed-cache-close)
@@ -129,6 +129,21 @@ short
           (should (= before orsb-search-test--calls))
           (should (equal mtime (file-attribute-modification-time (file-attributes file)))))))))
 
+;; A schema file states rules; embedding it would give its headings ids and
+;; so turn them into notes.
+(ert-deftest orsb-search-leaves-schema-files-alone ()
+  (orsb-search-test--with-fake
+    (let* ((dir (make-temp-file "orsb-schema-" t))
+           (file (expand-file-name "_schema.org" dir))
+           (text "* Type\nWork with an outcome and an end, as this vault sees it.\n"))
+      (unwind-protect
+          (progn
+            (with-temp-file file (insert text))
+            (should (equal (orsb-search-generate-file file) '(0 . 0)))
+            (should (= orsb-search-test--calls 0))
+            (should (equal text (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+        (delete-directory dir t)))))
+
 (ert-deftest orsb-search-edit-makes-chunk-stale-then-regenerates ()
   (orsb-test-with-vault
     (orsb-search-test--with-fake
@@ -191,7 +206,7 @@ Same heading text twice; each gets its own id.
       (let ((file (orsb-test--write "reference/frigate.org" orsb-search-test--note)))
         (org-roam-db-sync)
         (orsb-search-generate-file file)
-        (let ((org-roam-semantic-embedding-model "new-model"))
+        (let ((orsb-embedding-model "new-model"))
           (should (orsb-search-file-stale-p file))
           (should (equal (orsb-search-generate-file file) '(1 . 0)))
           (should-not (orsb-search-file-stale-p file))
@@ -337,16 +352,16 @@ A vector with no id to key it by.
       (let ((file (orsb-test--write "reference/frigate.org" orsb-search-test--note)))
         (org-roam-db-sync)
         ;; the old per-file command embeds into the cache, not the note
-        (org-roam-semantic-generate-chunks-for-file file)
+        (orsb-search-generate-file file)
         (should-not (string-match-p "EMBEDDING" (orsb-test--file "reference/frigate.org")))
         (should-not (orsb-search-file-stale-p file))
         ;; the old query function reads the cache
-        (let ((hits (org-roam-semantic-get-similar-data
+        (let ((hits (orsb-search--similar-or-nil
                      "Overview. Frigate records the camera streams on the services VLAN." 3 0.5)))
           (should (equal (nth 3 (car hits)) "Overview")))
         ;; unreachable service: nil, as before, not an error
-        (cl-letf (((symbol-function 'org-roam-ai-generate-embedding) (lambda (_) nil)))
-          (should-not (org-roam-semantic-get-similar-data "anything")))))))
+        (cl-letf (((symbol-function 'orsb-search-embed) (lambda (_) nil)))
+          (should-not (orsb-search--similar-or-nil "anything")))))))
 
 (require 'orsb-tools-test)  ; for orsb-tools-test--call
 

@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain
@@ -56,7 +56,7 @@
 (require 'sqlite)
 (require 'seq)
 
-(defvar org-roam-semantic-embedding-model)
+(defvar orsb-embedding-model)
 
 (defgroup orsb-embed-cache nil
   "org-roam-second-brain embedding cache."
@@ -126,7 +126,7 @@ rebuilt from the notes at any time."
 (defun orsb-embed-cache--model (model)
   "MODEL, or the configured embedding model when MODEL is nil."
   (or model
-      (and (boundp 'org-roam-semantic-embedding-model) org-roam-semantic-embedding-model)
+      (and (boundp 'orsb-embedding-model) orsb-embedding-model)
       "default"))
 
 ;;;; Packing

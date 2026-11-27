@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Don Cruver
 
 ;; Author: Don Cruver
-;; Version: 3.1.4
+;; Version: 3.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: org-mode, roam, notes
 ;; URL: https://github.com/dcruver/org-roam-second-brain

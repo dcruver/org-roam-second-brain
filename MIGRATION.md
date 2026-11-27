@@ -1,5 +1,36 @@
 # Migrating to the current MCP contract
 
+## 3.1 → 3.2: two old files removed
+
+Nothing changes for an MCP client. In your Emacs configuration:
+
+- **`org-roam-vector-search.el` is gone**; search lives in `orsb-search.el`.
+  Replace `(require 'org-roam-vector-search)` or `(after! org-roam-vector-search
+  ...)` with plain settings. The options are renamed, and the old names still
+  work, with a warning:
+
+  | Before | Now |
+  |---|---|
+  | `org-roam-semantic-embedding-url` | `orsb-embedding-url` |
+  | `org-roam-semantic-embedding-model` | `orsb-embedding-model` |
+  | `org-roam-semantic-min-chunk-size` | `orsb-search-min-chunk-words` |
+  | `org-roam-semantic-similarity-cutoff` | `orsb-search-similarity-cutoff` |
+
+  `org-roam-semantic-embedding-dimensions` is gone: nothing read it. The
+  defaults are now Ollama's (`http://localhost:11434/v1`, `nomic-embed-text`).
+- **Commands renamed**, on the same keys: `org-roam-semantic-search` is
+  `orsb-search-notes` (`C-c v s`), `-insert-similar` and `-insert-related` are
+  `orsb-search-insert-similar` and `orsb-search-insert-related`, `C-c v g` and
+  `C-c v G` are `orsb-search-generate-buffer` and `orsb-search-generate-all`.
+  `C-c v c` is gone: `C-c v s` always shows the matching section.
+- **`orsb-blog.el` is gone**, and with it the `sb/blog-*` commands and
+  `C-c b B`. A blog post is a note like any other: give its folder a
+  `_schema.org` with the export properties and `#+hugo_` lines, create posts
+  with `sb/new`, and export with ox-hugo (`C-c C-e H H`). To keep the old
+  commands, copy `orsb-blog.el` from the `v3.1.4` tag into your own
+  configuration.
+- **`org-agenda-project-tracking.el`** went in 3.1.4; the same applies.
+
 ## 2.2 → 3.0: the vault defines its own note types
 
 3.0 is a breaking release. Nothing is kept for compatibility.

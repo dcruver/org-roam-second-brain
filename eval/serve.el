@@ -12,7 +12,7 @@
 ;;   ORSB_EVAL_PORT       port for the MCP server (127.0.0.1)
 ;;   ORSB_EVAL_EMBED_URL  OpenAI-compatible embeddings base URL, e.g.
 ;;                        http://127.0.0.1:8090/v1 (empty: no semantic search)
-;;   ORSB_EVAL_EMBED_MODEL, ORSB_EVAL_EMBED_DIMS  model name and vector size
+;;   ORSB_EVAL_EMBED_MODEL  model name
 ;;   ORSB_DEPS            same as for `make test': where org-roam is installed
 ;;
 ;; Before the server starts it syncs the org-roam database and, when an
@@ -71,7 +71,6 @@
 (require 'orsb-search)
 (require 'orsb-tools)
 (require 'org-roam-mcp-http)
-(require 'org-roam-vector-search)
 
 (let ((state (orsb-eval--env "ORSB_EVAL_STATE"))
       (embed-url (orsb-eval--env "ORSB_EVAL_EMBED_URL")))
@@ -81,10 +80,8 @@
         orsb-mcp-port (string-to-number (orsb-eval--env "ORSB_EVAL_PORT" "8017"))
         orsb-mcp-auth-token nil)
   (when embed-url
-    (setq org-roam-semantic-embedding-url embed-url
-          org-roam-semantic-embedding-model (orsb-eval--env "ORSB_EVAL_EMBED_MODEL" "stand-in")
-          org-roam-semantic-embedding-dimensions
-          (string-to-number (orsb-eval--env "ORSB_EVAL_EMBED_DIMS" "768")))))
+    (setq orsb-embedding-url embed-url
+          orsb-embedding-model (orsb-eval--env "ORSB_EVAL_EMBED_MODEL" "stand-in"))))
 
 (org-roam-db-sync 'force)
 

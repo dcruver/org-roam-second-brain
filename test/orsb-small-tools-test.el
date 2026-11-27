@@ -389,7 +389,7 @@ Neighbor; has a truck.
       (orsb-st--data "link_nodes" 'id "v-1" 'target_id "v-2")
       (should (eq (alist-get 'linked (car (alist-get 'related (orsb-st--data "find_related" 'id "v-1")))) t))
       ;; semantic search reports the matching section and its id
-      (cl-letf (((symbol-function 'org-roam-ai-generate-embedding) (lambda (_) '(1.0 0.0 0.0 0.0))))
+      (cl-letf (((symbol-function 'orsb-search-embed) (lambda (_) '(1.0 0.0 0.0 0.0))))
         (let ((hit (car (alist-get 'hits (orsb-st--data "search" 'query "where do recordings go")))))
           (should (equal (alist-get 'id hit) "v-1"))
           (should (equal (alist-get 'section hit) "Storage"))
