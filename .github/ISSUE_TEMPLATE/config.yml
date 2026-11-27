@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/dcruver/org-roam-second-brain/security/advisories/new
+    about: Report it privately here, not in a public issue.
+  - name: Questions and how-to
+    url: https://github.com/dcruver/org-roam-second-brain/discussions
+    about: Ask in Discussions. The FAQ covers what it needs, what it does to your notes, and what is not done yet.

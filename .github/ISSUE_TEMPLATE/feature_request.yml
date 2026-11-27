@@ -1,0 +1,20 @@
+name: Feature request
+description: Something the package or the server should do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The chore in your vault that is awkward or impossible today, in your words or in the words you would say to an assistant.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: A tool, an argument, a rule a `_schema.org` could state, a command. If it is a tool, what a small model would have to get right to use it.
+  - type: textarea
+    id: now
+    attributes:
+      label: What you do instead

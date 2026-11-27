@@ -1,0 +1,50 @@
+name: Bug report
+description: A command or a tool failed, did the wrong thing, or surprised you.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If something surprised you, that counts. Please take anything private out of the
+        notes and answers you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran in Emacs, or the tool call and its answer. Paste text, not a screenshot.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The value of `orsb-tools-version` (`C-h v`), or the tag or commit you installed.
+    validations:
+      required: true
+  - type: input
+    id: emacs
+    attributes:
+      label: Emacs and org-roam
+      description: Emacs version, org-roam version, and Doom, straight.el or package-vc.
+      placeholder: Emacs 30.1, org-roam 2.3.1, Doom
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Assistant
+      description: If a tool call is involved, the MCP client and the model.
+      placeholder: Claude Code; or llama.cpp with a 27B local model
+  - type: textarea
+    id: schema
+    attributes:
+      label: _schema.org
+      description: If the vault's rules are involved, the `_schema.org` files that apply to the note.
+      render: org

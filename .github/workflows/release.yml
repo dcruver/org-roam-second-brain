@@ -1,0 +1,34 @@
+name: Release
+
+# A tag vX.Y.Z publishes a GitHub release whose notes are that version's section of
+# CHANGELOG.md. A tag with a - (v3.2.0-rc1) is published as a pre-release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches orsb-tools-version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          declared=$(sed -n 's/^(defconst orsb-tools-version "\(.*\)")$/\1/p' orsb-tools.el)
+          if [ "$version" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME, but orsb-tools-version is $declared" >&2
+            exit 1
+          fi
+      - name: Release notes from CHANGELOG.md
+        run: ci/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md && cat notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) pre=--prerelease ;; *) pre= ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "org-roam-second-brain ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md $pre

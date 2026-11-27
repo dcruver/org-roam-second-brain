@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>org-roam-second-brain: notes you and an AI assistant both keep</title>
+<meta name="description" content="A second brain on org-roam that you and an AI assistant both keep: the vault defines its own note types and rules, an MCP server in Emacs Lisp gives an assistant 23 tools sized for small local models, and every write can be previewed, approved and undone.">
+<meta property="og:title" content="org-roam-second-brain: notes you and an AI assistant both keep">
+<meta property="og:description" content="The vault defines its own note types and rules. An MCP server inside Emacs gives an assistant 23 tools sized for small local models. Every write can be previewed, approved and undone.">
+<meta property="og:image" content="https://raw.githubusercontent.com/dcruver/org-roam-second-brain/main/docs/images/demo.gif">
+<style>
+  :root {
+    --bg: #faf9fc; --fg: #1e1d24; --muted: #5f5d6b; --line: #e2e0ea;
+    --card: #ffffff; --code-bg: #f0eef5; --accent: #6a4fb3; --accent-fg: #ffffff; --link: #5a40a0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16151b; --fg: #e7e5ee; --muted: #9d9aab; --line: #2c2a36;
+      --card: #1d1c24; --code-bg: #100f14; --accent: #a48be6; --accent-fg: #16151b; --link: #b9a4f0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16151b; --fg: #e7e5ee; --muted: #9d9aab; --line: #2c2a36;
+    --card: #1d1c24; --code-bg: #100f14; --accent: #a48be6; --accent-fg: #16151b; --link: #b9a4f0;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, sans-serif;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 0 16px 48px; }
+  a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  header { padding: 56px 0 8px; }
+  header h1 { font-size: 2.4rem; line-height: 1.1; margin: 0 0 10px; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+  header h1 small { display: block; font-size: 1.15rem; font-weight: 500; color: var(--muted); margin-top: 8px; letter-spacing: 0; }
+  .lede { font-size: 1.15rem; max-width: 42em; margin: 18px 0 22px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 36px; }
+  .button {
+    display: inline-block; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--fg); text-decoration: none; font-weight: 500;
+  }
+  .button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  figure { margin: 0 0 12px; }
+  figure img { display: block; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); background: #1e1e2e; }
+  figcaption { color: var(--muted); font-size: 0.92rem; margin-top: 8px; }
+  pre, code { font: 0.92em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 0 0 12px; }
+  pre code { background: none; padding: 0; }
+  .comment { color: var(--muted); }
+  section { margin-top: 44px; }
+  h2 { font-size: 1.45rem; margin: 0 0 14px; letter-spacing: -0.01em; }
+  .points { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 0; padding: 0; list-style: none; }
+  .points li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .points b { display: block; margin-bottom: 4px; }
+  .points p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  .status { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; color: var(--muted); }
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.92rem; }
+  footer p { margin: 6px 0; }
+  @media (max-width: 480px) {
+    header { padding-top: 36px; }
+    header h1 { font-size: 1.8rem; }
+    body { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>org-roam-second-brain<small>Notes you and an AI assistant both keep</small></h1>
+  <p class="lede">Your notes stay plain org files. The vault says what each kind of note must have and what may
+  change only with your approval; an MCP server inside Emacs gives an assistant 23 tools over the same notes,
+  sized for small local models; and every write can be previewed and undone.</p>
+  <div class="actions">
+    <a class="button primary" href="#install">Install</a>
+    <a class="button" href="https://github.com/dcruver/org-roam-second-brain">GitHub</a>
+    <a class="button" href="https://github.com/dcruver/org-roam-second-brain/blob/main/docs/guide.md">Guide</a>
+    <a class="button" href="https://github.com/dcruver/org-roam-second-brain/blob/main/docs/tools.md">Tools</a>
+    <a class="button" href="https://github.com/dcruver/org-roam-second-brain/blob/main/docs/faq.md">FAQ</a>
+    <a class="button" href="https://hullabalooing.cruver.ai/second-brain/posts/a-second-brain-that-my-ai-and-i-share/">The story</a>
+  </div>
+</header>
+
+<figure>
+  <img src="images/demo.gif" alt="Claude Code, connected to the notes server, answers a question from the vault and is asked to record a decision in a project; the project type's rules make that a proposal, which appears in the Emacs digest, is previewed and approved on the approval screen, and is then in the note" width="1280" height="720">
+  <figcaption>An assistant answers from the vault and is asked to record a decision. The project type says decisions
+  need approval, so the change waits: it shows in the Emacs digest, is previewed and approved, and only then is in the note.</figcaption>
+</figure>
+
+<pre><code>(use-package org-roam-second-brain
+  :after org-roam
+  :config
+  (orsb-mode 1)        <span class="comment">; C-c b: the digest, new notes, the approval screen</span>
+  (orsb-mcp-start))    <span class="comment">; http://127.0.0.1:8007/mcp</span></code></pre>
+
+<section>
+  <h2>What it is</h2>
+  <ul class="points">
+    <li><b>The vault defines its types</b><p>A folder is a note type when it holds a <code>_schema.org</code>: required properties, status values, starting sections. The package has no types of its own.</p></li>
+    <li><b>Rules on every write</b><p>A section may only grow, be rewritten whole, or change by approval. A write that breaks a rule is reported, or refused in a folder marked strict.</p></li>
+    <li><b>Approval where you want it</b><p>The assistant files the change with a reason. You see it line by line in Emacs and approve or reject it. Nothing is written until you do.</p></li>
+    <li><b>Every write can be undone</b><p>Each one returns a <code>change_id</code>; <code>restore</code> puts every file it touched back. Most writes take a dry run.</p></li>
+    <li><b>Sized for small local models</b><p>23 tools, one way to name a note, one answer shape, and a hint on every error. A test kit scores a model on nineteen everyday chores.</p></li>
+    <li><b>Nothing but Emacs</b><p>The server is Emacs Lisp, inside your Emacs. No Python, no Node, no container. Search by meaning needs an embeddings endpoint, and is optional.</p></li>
+  </ul>
+</section>
+
+<section id="install">
+  <h2>Install</h2>
+  <p>Emacs 29.1 or newer and <a href="https://www.orgroam.com/">org-roam</a> 2.2 or newer. With Doom Emacs, in <code>packages.el</code>:</p>
+  <pre><code>(package! org-roam-second-brain
+  :recipe (:host github :repo "dcruver/org-roam-second-brain"))</code></pre>
+  <p>With straight.el, or Emacs's own <code>package-vc</code>:</p>
+  <pre><code>(straight-use-package
+ '(org-roam-second-brain :type git :host github :repo "dcruver/org-roam-second-brain"))
+
+(package-vc-install "https://github.com/dcruver/org-roam-second-brain")</code></pre>
+  <p>Then <code>(orsb-mode 1)</code>. Each <a href="https://github.com/dcruver/org-roam-second-brain/releases">release</a> says what it changed.</p>
+</section>
+
+<section>
+  <h2>A note type is a text file you can read</h2>
+  <p>Put this in <code>projects/_schema.org</code> and every note in that folder is a project, for you and for the assistant.</p>
+  <pre><code>* Type
+:PROPERTIES:
+:TYPE: project
+:LIFECYCLE: STATUS
+:LIFECYCLE_VALUES: active waiting done
+:LIFECYCLE_FINISHED: done
+:END:
+
+* Properties
+| property    | required | form                    | default |
+|-------------+----------+-------------------------+---------|
+| STATUS      | yes      | one of LIFECYCLE_VALUES | active  |
+| NEXT-ACTION | yes      | one sentence            |         |
+
+* Sections
+| section       | required | rule    |
+|---------------+----------+---------|
+| Current state | yes      | replace |
+| Log           | yes      | append  |
+| Decisions     | no       | propose |</code></pre>
+</section>
+
+<section>
+  <h2>Connect an assistant</h2>
+  <p>Any MCP client that speaks Streamable HTTP. With Claude Code:</p>
+  <pre><code>claude mcp add --transport http notes http://localhost:8007/mcp</code></pre>
+  <p>The server tells the model how to behave when it connects, so there is no skill or prompt to install.
+  The <a href="https://github.com/dcruver/org-roam-second-brain/blob/main/docs/tools.md">tools page</a> lists what it can call.</p>
+</section>
+
+<section>
+  <h2>Where it stands</h2>
+  <p class="status">Version 3. The tests run on Emacs 29 and 30. It has kept one vault so far, the author's, mostly
+  through an assistant on a local model, so a vault laid out differently will find rough edges. The
+  <a href="https://github.com/dcruver/org-roam-second-brain/blob/main/docs/faq.md#what-is-not-done-yet">FAQ</a> says what is missing, and an
+  <a href="https://github.com/dcruver/org-roam-second-brain/issues">issue</a> about your vault is welcome.</p>
+</section>
+
+<footer>
+  <p>org-roam-second-brain is free software under the <a href="https://github.com/dcruver/org-roam-second-brain/blob/main/LICENSE">GPL-3.0-or-later</a>,
+  built on <a href="https://www.orgroam.com/">org-roam</a>, which is not affiliated with it.</p>
+  <p>Made by <a href="https://github.com/dcruver">Don Cruver</a>.</p>
+</footer>
+</main>
+</body>
+</html>

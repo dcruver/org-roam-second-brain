@@ -1,31 +1,71 @@
 # org-roam-second-brain
 
-A second brain on top of [org-roam](https://www.orgroam.com/): typed notes
-(projects, people, ideas, admin, blog posts) with conventions an agent can
-rely on, semantic search over your vault, a daily digest, and an **MCP server**
-so an LLM assistant uses the same notes you do. Everything is Emacs Lisp; the
-only external service is an OpenAI-compatible embeddings endpoint (optional).
+A second brain on [org-roam](https://www.orgroam.com/) that you and an AI assistant
+both keep.
 
-Version 3.0 has one core and one contract, sized for small local models, and
-no note types of its own: a vault describes its types in `_schema.org` files
-(see [Note types](#note-types-_schemaorg)).
+Your notes stay plain org files in a folder. The package adds three things to them.
+The vault describes its own note types, in small `_schema.org` files: what a project
+or a person note must have, which sections may only grow, and what may change only
+with your approval. An **MCP server**, written in Emacs Lisp and running inside
+Emacs, gives an assistant 23 tools over the same notes, sized for small local models:
+one way to name a note, one answer shape, and a hint on every error. And every write,
+yours or the assistant's, follows the vault's rules, can be previewed, and can be
+undone.
 
-| Module | What it is |
-|---|---|
-| `orsb-core.el` | Every capability as a plain function: resolve a note by id, path or title; read and write the `:PROPERTIES:` drawer; create notes; edit sections with a destructive-replace guard; daily notes, inbox, follow-ups, blog status. |
-| `orsb-tools.el` | The 22-tool MCP contract on top of the core: one `id` parameter, one `{ok, data | error}` envelope with a hint on every error, the vault's own rules applied to every write, proposals, and an undo journal behind every write. `MIGRATION.md` maps the tool names of earlier versions onto these. |
-| `org-roam-mcp-http.el` | The MCP server (Streamable HTTP, POST): per-client sessions, optional bearer token, tool timeout, request log. |
-| `orsb-schema.el` | Note types and their rules, read from the vault's `_schema.org` files: inheritance down the folders, the check of existing notes, the rules a write must keep. Needs no org-roam database. |
-| `orsb-embed-cache.el` | The embedding store: one SQLite file beside the notes (not in them), one row per node and model. |
-| `orsb-search.el` | Semantic search: stale detection by content hash, an in-memory index loaded from the cache, an idle-time worker that re-embeds what changed, and the migration from in-note vectors. |
-| `org-roam-vector-search.el` | The embedding primitives and the interactive search commands. |
-| `org-roam-second-brain.el` | The human side: `orsb-mode` (`C-c b` and `C-c v`). `sb/new` creates a note of any type the vault defines, asking for what that type requires; `sb/digest`, `sb/open`, `sb/stale` and `sb/list` show unfinished work and notes by type; `sb/proposals` reviews changes waiting for approval (RET preview, `a` approve, `r` reject); plus the inbox, title search, link suggestions and daily-note linking. It goes through the same tool functions as the MCP server, so the same rules apply. |
-| `orsb-blog.el` | Optional: the `sb/blog-*` commands for a folder of ox-hugo posts (`orsb-blog-directory`), under `C-c b B` once loaded. |
-| `org-agenda-project-tracking.el` | Optional agenda views and TODO journaling (`orsb-agenda-setup`). |
+![Claude Code, connected to the notes server, answers a question from the vault and is asked to record a decision in a project; the project type's rules make that a proposal, which appears in the Emacs digest, is previewed and approved on the approval screen, and is then in the note](https://raw.githubusercontent.com/dcruver/org-roam-second-brain/main/docs/images/demo.gif)
+
+```elisp
+(use-package org-roam-second-brain
+  :after org-roam
+  :config
+  (orsb-mode 1)        ; C-c b: the digest, new notes, the approval screen
+  (orsb-mcp-start))    ; http://127.0.0.1:8007/mcp
+```
+
+```sh
+claude mcp add --transport http notes http://localhost:8007/mcp
+```
+
+Status: version 3. It keeps my own vault every day, mostly through an assistant on a
+local model. See "Where it stands" at the end.
+
+## What it does
+
+- **The vault defines its note types.** A folder is a type when it holds a
+  `_schema.org`: required properties and their forms, the status values and which of
+  them mean finished, the sections a note starts with, and a rule for each section
+  (`replace`, `append` or `propose`). Rules are inherited down the folders. The
+  package has no types of its own.
+- **Rules apply to every write.** A write that breaks a rule comes back with
+  `warnings`, or is refused in a folder marked `strict`. `check_schema` lists where
+  existing notes depart from the rules and changes nothing.
+- **Changes that need your approval wait for it.** A section or a whole type can be
+  marked `propose`. The assistant files the change with a reason; you see its
+  line-by-line preview in Emacs (`C-c b A`) and approve or reject it. Nothing is
+  written until you do.
+- **Every write can be undone.** Each one returns a `change_id`, and `restore` puts
+  every file it touched back. Most writes take `dry_run`.
+- **Tools sized for small models.** 23 tools; a note is named by its id, path, title
+  or `today`; answers are `{ok, data}` or `{ok, error}` with a hint saying what to do
+  next. The repository carries a test kit that gives a model nineteen everyday vault
+  chores and reads the files afterwards to see whether each was really done.
+- **Search by meaning.** Embeddings from any OpenAI-compatible endpoint, kept in one
+  SQLite file beside the notes, not in them, and refreshed in idle time. Optional:
+  without an endpoint, word and title search still work.
+- **A digest in Emacs.** Unfinished notes of every type with a lifecycle, the stale
+  ones, tasks due, the inbox, and what waits for approval.
+- **Nothing but Emacs.** No Python, no Node, no container. The only outside service is
+  the embeddings endpoint, and it is optional.
+
+The longer story of sharing one set of notes with an assistant is in the blog post
+[A Second Brain That My AI and I Share](https://hullabalooing.cruver.ai/second-brain/posts/a-second-brain-that-my-ai-and-i-share/),
+written when the package was at version 1.
 
 ## Install
 
-Doom Emacs (`packages.el` and `config.el`):
+Emacs 29.1 or newer (for the builtin SQLite) and org-roam 2.2 or newer.
+
+Doom Emacs (`packages.el`, then `config.el`):
 
 ```elisp
 (package! org-roam-second-brain
@@ -46,50 +86,39 @@ straight.el:
 (orsb-mode 1)
 ```
 
-Requires Emacs 29.1+ (builtin SQLite) and org-roam 2.2+.
-
-## Configure
-
-Everything environment-specific is a defcustom in the `orsb` group:
+Emacs 29's own `package-vc`:
 
 ```elisp
-(setq org-roam-directory "~/org-roam")
-;; the two folders the package itself uses (defaults shown)
-(setq orsb-daily-directory "daily" orsb-archive-directory "archive")
-;; days without a change before unfinished work counts as stale
-(setq orsb-stale-days 5)
-;; semantic search (any OpenAI-compatible /embeddings endpoint, e.g. Ollama or Infinity)
-(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
-      org-roam-semantic-embedding-model "nomic-embed-text")
+(package-vc-install "https://github.com/dcruver/org-roam-second-brain")
 ```
 
-## Note types: `_schema.org`
+Update with `doom sync -u`, `M-x straight-pull-package` or `M-x package-vc-upgrade`.
+A particular release is a tag, `v3.1.3` for example; the
+[releases](https://github.com/dcruver/org-roam-second-brain/releases) say what each
+one changed. It is not on MELPA yet.
 
-The package defines no note types. A folder becomes a type when it holds a
-`_schema.org` that sets `TYPE`; a folder without one is grouping only. A
-folder's rules are the vault root's file, then each `_schema.org` on the way
-down, merged: a lower file's entry replaces the same one from above, new
-entries are added, and a table row whose second column is `remove` deletes an
-inherited one. So a note's type is where it lives, a folder says what a note
-*is a kind of*, and what a note *has* or *belongs to* is a property whose
-form is a link. The files carry no `:ID:`, so they are not notes.
+## A vault, in a few steps
+
+`orsb-mode` binds `C-c b` (the second-brain commands) and `C-c v` (search by
+meaning). With no `_schema.org` anywhere, every note is a `note` and nothing is
+checked, so you can start with the vault you have.
+
+Give a folder a type by putting a `_schema.org` in it:
 
 ```org
 * Type
 :PROPERTIES:
 :TYPE: project
-:WRITE: open                 # open | append | propose | readonly
-:LIFECYCLE: STATUS           # the property that says how far along it is
+:LIFECYCLE: STATUS
 :LIFECYCLE_VALUES: active waiting done
 :LIFECYCLE_FINISHED: done
 :END:
 
 * Properties
-| property    | required | form                        | default |
-|-------------+----------+-----------------------------+---------|
-| STATUS      | yes      | one of LIFECYCLE_VALUES     | active  |
-| NEXT-ACTION | yes      | one sentence                |         |
-| IDEA        | no       | link to a note of type idea |         |
+| property    | required | form                    | default |
+|-------------+----------+-------------------------+---------|
+| STATUS      | yes      | one of LIFECYCLE_VALUES | active  |
+| NEXT-ACTION | yes      | one sentence            |         |
 
 * Sections
 | section       | required | rule    |
@@ -97,195 +126,75 @@ form is a link. The files carry no `:ID:`, so they are not notes.
 | Current state | yes      | replace |
 | Log           | yes      | append  |
 | Decisions     | no       | propose |
-
-* Keywords
-| keyword | value    |
-|---------+----------|
-| date    | [%DATE%] |
-
-* Template
-** Current state
-As of %DATE%.
-** Log
 ```
 
-- Forms the server checks: `id`, `one of A B C` (or the name of a Type key
-  holding the list), `date`, `URL`, `four digits`, `link` and `link to a note
-  of type T`. Anything else is a description.
-- `date, set by the server` is filled in on creation. Defaults, keyword
-  values and the template may use `%DATE%`, `%TITLE%` and `%SLUG%`. A keyword value may also use `%TAGS%`
-  (the note's tags, space separated). `%BODY%` in
-  the template is where the text given at creation goes (before the first
-  heading when the template does not say).
-- Section rules: `replace` (rewritten whole), `append` (only grows),
-  `propose` (needs approval). A type's `WRITE` does the same for the whole
-  note; `NEVER: move merge delete` forbids those operations.
-- The root file may also set `EXCLUDE` (subfolders outside the rules),
-  `NOTES_HERE: no` (no note directly in this folder) and `ENFORCE`:
-  `strict` refuses a write that breaks a rule, `warn` (the default) makes it
-  and lists what it broke under `warnings`, `off` ignores the rules. `ENFORCE`
-  is inherited like any other key, so one folder can be strict in a vault
-  that otherwise warns.
-- A vault with no `_schema.org` has one type, `note`, and no rules.
+Now `C-c b n` offers `project` and asks for what it requires, the digest (`C-c b d`)
+lists the projects that are not `done`, an assistant can add to `Log` but not rewrite
+it, and a change to `Decisions` waits on the approval screen (`C-c b A`). The
+[guide](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/guide.md#note-types-_schemaorg)
+has the whole format: forms, defaults, templates, inheritance, and `strict`, `warn`
+and `off`.
 
-`check_schema` lists where existing notes depart from the rules; it changes
-nothing. `get_schema` lists the types found, and with `type` one type's
-merged rules.
+For search by meaning, point it at an embeddings endpoint (Ollama here) and embed the
+vault once with `M-x orsb-search-generate-all`:
 
-**Proposals.** Any write tool takes `propose: true` (and a `reason`): the
-change is worked out, stored with its line-by-line preview, and nothing is
-written. `get_proposals` lists what is waiting; `decide_proposal` approves
-(applies it, returning a `change_id`) or rejects. A proposal whose note
-changed since it was filed is refused unless forced. Proposing lifts only the
-`propose` rules; every other rule still holds. The server cannot tell callers
-apart: restricting who may call `decide_proposal` is the job of whatever sits
-in front of it.
+```elisp
+(setq org-roam-semantic-embedding-url "http://localhost:11434/v1"
+      org-roam-semantic-embedding-model "nomic-embed-text")
+```
 
-Proposals that belong together can share a `batch` label when they are filed.
-`decide_proposal` with `batch` decides every pending proposal of that batch
-and lists the ones it refused; in Emacs, `B` on the approval screen does the
-same for the batch of the proposal at point.
+## Using it from an AI assistant
 
-Proposals are kept by the notes server that took them, outside the vault. In an
-Emacs that is not that server (a desktop beside a headless server), set
-`orsb-server-url` to the server's address (`http://host:8007/mcp`): `sb/proposals`
-then lists, shows and decides them there, and the server makes the approved change.
-
-## The MCP server
+Start the server in a long-lived Emacs (a daemon is ideal):
 
 ```elisp
 (setq orsb-mcp-host "127.0.0.1"    ; "0.0.0.0" to serve your LAN
       orsb-mcp-port 8007
-      orsb-mcp-auth-token nil)     ; set a string to require Authorization: Bearer
+      orsb-mcp-auth-token nil)     ; a string requires Authorization: Bearer
 (orsb-mcp-start)
 ```
 
-Point an MCP client at `http://host:8007/mcp` (Streamable HTTP, POST only; no
-SSE stream). The server keeps one session per client, times out a tool after
-`orsb-mcp-tool-timeout` seconds, and logs every request to `*orsb-mcp-log*`.
-
-Try it:
+Then point any MCP client that speaks Streamable HTTP at `http://host:8007/mcp`. With
+Claude Code:
 
 ```sh
-curl -s -X POST http://localhost:8007/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_schema","arguments":{}}}'
+claude mcp add --transport http notes http://localhost:8007/mcp
 ```
 
-### Tools
+The server tells the model how to behave when it connects (search before creating,
+undo with `restore`, follow the hints, never approve its own proposals), so there is
+no skill or prompt to install. The [tools page](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/tools.md)
+lists the 23 tools. The server cannot tell callers apart: if it listens beyond your
+own machine, set a token, and put whatever decides who may approve in front of it.
 
-Nineteen tools, one set. A small model gets few, clear choices, and every
-error says what to do next.
+## Where it stands
 
-| Tool | Purpose |
-|---|---|
-| `search` | semantic (by meaning), contextual (word match) or title search; each hit names the matching section and shows a snippet from it |
-| `get_node` | one note or heading: metadata, links, an outline of its sections, and the body (cut at `max_chars`; read one `section` at a time) |
-| `list_nodes` | notes filtered by type, status, staleness, tags, `orphan`, `broken_links` or `linked_to`; pages with `limit` and `offset` |
-| `find_related` | notes close in meaning to a note or a text, each marked `linked` or not, so missing links stand out |
-| `create_node` | a typed note, or with `parent_id` a heading (task, section) inside one, with `todo`, `scheduled`, `deadline`; refuses an existing title and lists it (`on_duplicate`) |
-| `set_node` | title (link text elsewhere follows), status, todo, scheduled, deadline, properties, tags, aliases, keywords; `heading` picks a heading by title |
-| `update_body` | append / prepend / replace, per section or whole note (guarded); a missing section is an error listing the real ones |
-| `set_checkbox` | tick or untick one checklist item, by its text or index |
-| `get_tasks` | open TODO headings and checkboxes across the vault, dated first; filter by state, note, mentions, due date, text |
-| `link_nodes` | add (idempotent) or remove a link; `both_ways`; removing a link inside a sentence keeps the words |
-| `move_node` | refile a heading under another note or heading, or make it a note of its own; links keep working; with `folder`, move a whole note to another folder (and so to another type) |
-| `merge_nodes` | fold one note into another as a section; links to it keep working |
-| `delete_node` | delete a heading, or archive (default) / delete a note; returns the notes that linked to it |
-| `add_daily_entry` | a structured entry in today's (or a given day's) daily note |
-| `log_to_inbox`, `resolve_inbox` | add a line to today's inbox and get its ref; later mark it done, optionally filing it into a note |
-| `get_review` | one call for what needs attention: unfinished notes of every type with a lifecycle and the stale ones among them, due tasks, open inbox entries, vault health |
-| `restore` | undo any write by its `change_id`, or list recent changes |
-| `get_schema` | the vocabulary the server enforces: the types the vault defines, TODO keywords, tags in use; with `type`, that type's rules |
-| `check_schema` | where existing notes depart from the vault's rules (read-only) |
-| `get_proposals`, `decide_proposal` | changes filed for approval: list or show them, approve or reject |
-| `reassign_id` | give a note that shares its id with another note an id of its own, so both are visible |
+Version 3.1. The tool contract was rewritten for 2.0 and again for 3.0, and both were
+breaking: [MIGRATION.md](https://github.com/dcruver/org-roam-second-brain/blob/main/MIGRATION.md)
+maps the old names onto the new. The tests run on Emacs 29 and 30 with each push. It
+has kept one vault so far, mine, so a vault laid out differently will find rough
+edges; an [issue](https://github.com/dcruver/org-roam-second-brain/issues) saying what
+you hit is welcome. Not done yet: MELPA, and any way for the server to tell one caller
+from another. The [FAQ](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/faq.md#what-is-not-done-yet)
+has the full list.
 
-Every tool takes `id` as an org-roam id, a vault-relative path, an exact
-title or alias, or `today` / `yesterday` / `YYYY-MM-DD` for a daily note. An
-ambiguous title is an error listing the candidates. Answers are
-`{"ok":true,"data":{...}}` or `{"ok":false,"error":{"code","message","hint"}}`
-(with MCP `isError`). A type's lifecycle value (`status`) is checked against
-the values its `_schema.org` allows.
+## Documentation
 
-Every write is recorded: the answer carries a `change_id`, and `restore`
-with it puts every file the write touched back as it was (a restore is
-itself recorded, so it can be undone too). Most writes also take
-`dry_run: true`, which answers with what would change and writes nothing.
-If a write fails halfway, the files it already changed are put back. The
-journal lives in `orsb-change-directory` (default `orsb-changes/` in your
-Emacs directory) and keeps the last `orsb-change-keep` (200) changes.
+- [Guide](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/guide.md): setup, the `_schema.org` format, proposals,
+  the Emacs commands, semantic search, running the server.
+- [Tools](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/tools.md): the MCP server and its 23 tools.
+- [FAQ](https://github.com/dcruver/org-roam-second-brain/blob/main/docs/faq.md): what it needs, what it does to your notes, and
+  what is not done yet.
+- [MIGRATION.md](https://github.com/dcruver/org-roam-second-brain/blob/main/MIGRATION.md): coming from 1.x or 2.x.
+- [eval/README.md](https://github.com/dcruver/org-roam-second-brain/blob/main/eval/README.md): the small-model test kit.
+- [CHANGELOG.md](https://github.com/dcruver/org-roam-second-brain/blob/main/CHANGELOG.md): what changed in each release.
 
-At `initialize` the server sends `orsb-mcp-instructions`, a few lines of
-guidance for the model (search before creating, undo with restore, follow
-the hints). Set it to your own text, or `nil` to send none.
+## Contributing
 
-Options:
+[CONTRIBUTING.md](https://github.com/dcruver/org-roam-second-brain/blob/main/CONTRIBUTING.md) says how to run the tests, what a
+change needs, and what help is most wanted (using it on a vault that is not mine,
+above all).
 
-```elisp
-(setq orsb-duplicate-similarity 0.9)  ; create_node also flags notes close in meaning
-                                      ; (one embedding call per create)
-```
+## License
 
-### The graph, for drawing
-
-`GET /graph` on the same port answers `{"ok":true,"data":{"nodes":[...],"links":[...]}}`:
-every node (id, title, vault-relative file, level, pos, tags) and every id link
-as a `[source, dest]` pair, straight from the database, no bodies. It is a plain
-HTTP endpoint, not an MCP tool, because it is for a program that draws the graph,
-not for a model. It honours `orsb-mcp-auth-token` like the rest.
-
-## Semantic search
-
-Embeddings live in one SQLite file beside the notes, not in them:
-`orsb-embed-cache-file`, by default
-`~/.cache/org-roam-second-brain/embeddings.db`. Keep it outside any synced
-folder. Each row is one org-roam node (keyed by its `:ID:`) and one embedding
-model, with the hash of the text it was made from:
-
-```
-node_id       org-roam ID of the heading (or file)
-model         embedding model that made it
-content_hash  sha1 of the normalized chunk text
-dims          vector length
-vector        little-endian float32s, packed as a blob
-updated_at    when it was embedded (ISO 8601, UTC)
-```
-
-Saving a note queues it; an idle-time worker re-embeds only the chunks whose
-text changed, and writes nothing to the note except an `:ID:` the first time
-a heading is embedded (its key). Queries read an in-memory index loaded from
-the cache. Changing `org-roam-semantic-embedding-model` makes every chunk
-stale for the new model; old rows keep serving the old model until
-`M-x orsb-search-prune-cache` removes them (along with rows for nodes that no
-longer exist). The file is a cache: delete it and `sync {"embeddings": true}`
-or `M-x orsb-search-generate-all` rebuilds it.
-
-### Moving a vault off in-note embeddings
-
-Vaults from before 2.1 carry `:EMBEDDING:` and `:EMBEDDING_HASH:` lines in
-their notes. Two commands, run on the machine that runs the server:
-
-1. `M-x orsb-search-migrate-properties` copies those vectors into the cache.
-   It reads the notes and writes nothing to them; running it twice is
-   harmless. Vectors in a drawer without an `:ID:` are left for the worker to
-   re-embed.
-2. When you are happy with search, `M-x orsb-search-strip-properties` removes
-   the lines from the notes (`C-u` first for a dry run that only counts). It
-   removes a vector only when the cache holds a row for that node, and skips
-   notes with unsaved edits. This rewrites each affected note once, so let
-   Syncthing settle before editing elsewhere.
-
-Until step 2, other devices still see the old lines; nothing reads them.
-
-## Develop
-
-```sh
-make test     # ERT against a throwaway vault (ORSB_DEPS points at your org-roam build)
-make compile  # byte-compile everything, warnings shown
-make lint     # warnings are errors for the orsb-* modules
-make reload   # reload into a running Emacs server and restart the MCP server
-make eval     # give a local model everyday vault chores and score them (eval/README.md)
-```
-
-CI runs the same on Emacs 29 and 30. See `SETUP.md` for a full
-walkthrough and `MIGRATION.md` for the 1.x → 2.0 → 2.1 tool mapping.
+GPL-3.0-or-later, like org-roam and Emacs. See [LICENSE](https://github.com/dcruver/org-roam-second-brain/blob/main/LICENSE).

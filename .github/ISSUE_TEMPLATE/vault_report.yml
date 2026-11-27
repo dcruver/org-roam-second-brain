@@ -1,0 +1,35 @@
+name: Vault report
+description: You used it on your own vault, or with a model not tried yet. Say how it went.
+labels: ["vault report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The package has kept one vault so far. A report from another one, good or bad, is
+        the most useful thing you can send.
+  - type: textarea
+    id: vault
+    attributes:
+      label: The vault
+      description: Roughly how many notes, how the folders are laid out, and which types you gave a `_schema.org`.
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Assistant and model
+      placeholder: Claude Code; or an agent on llama.cpp with a 27B local model; or none
+  - type: textarea
+    id: went
+    attributes:
+      label: How it went
+      description: What worked, what the model got wrong, which rule or tool surprised you. `make eval` results are welcome too.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The value of `orsb-tools-version`.
+    validations:
+      required: true
